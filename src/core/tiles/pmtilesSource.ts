@@ -59,7 +59,7 @@ export class PMTilesVectorSource implements TileSource {
     const header = (await this.archive.getHeader()) as HeaderLike;
     const metadata = (await this.archive.getMetadata()) as MetadataLike;
     const tileRange = rangeForRequest(request, header);
-    const resolvedBBox = tileRangeToBBox(tileRange);
+    const resolvedBBox = request.bbox ?? tileRangeToBBox(tileRange);
     const features: MapFeature[] = [];
     const layerStats = createLayerStats();
     let fetchedTileCount = 0;

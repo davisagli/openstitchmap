@@ -59,7 +59,7 @@ export class HostedVectorTileSource implements TileSource {
     const tileRange = request.bbox
       ? bboxToTileRange(request.bbox, zoom)
       : centeredTileRange(center.lon, center.lat, zoom, request.tileSpan ?? 2);
-    const resolvedBBox = tileRangeToBBox(tileRange);
+    const resolvedBBox = request.bbox ?? tileRangeToBBox(tileRange);
     const features: MapFeature[] = [];
     const layerStats = createLayerStats();
     let fetchedTileCount = 0;

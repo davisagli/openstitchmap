@@ -1,8 +1,10 @@
 import { useDeferredValue, useEffect, useRef, useState, useTransition } from 'react';
+import type { PointerEvent as ReactPointerEvent, WheelEvent as ReactWheelEvent } from 'react';
 import './App.css';
-import { DemoTileSource, type LoadedSourceData } from '../core/tiles/tileSource';
+import type { BBox, MapFeature, Position } from '../core/osm';
+import type { LoadedSourceData } from '../core/tiles/tileSource';
 import { HostedVectorTileSource } from '../core/tiles/hostedVectorSource';
-import { PMTilesVectorSource } from '../core/tiles/pmtilesSource';
+import { lonLatToWorld, worldToLonLat } from '../core/tiles/mercator';
 import { areaPresets } from '../core/tiles/presets';
 import {
   compilePattern,
@@ -19,11 +21,18 @@ import { drawStitchPreview } from '../render/drawStitchPreview';
 import { exportCanvasPng, exportPatternJson } from '../render/exporters';
 
 type ViewMode = 'chart' | 'stitched';
-type SourceMode = 'hosted' | 'pmtiles' | 'demo';
+
+interface PreviewMotion {
+  scale: number;
+  translateX: number;
+  translateY: number;
+}
 
 interface Settings {
-  areaPresetId: string;
-  sourceMode: SourceMode;
+  center: {
+    lat: number;
+    lon: number;
+  };
   width: number;
   height: number;
   fabricCount: number;
@@ -32,17 +41,17 @@ interface Settings {
   includeMinorRoads: boolean;
   includePoiLabels: boolean;
   zoomHint: number;
-  tileSpan: number;
   pmtilesUrl: string;
 }
 
 const HOSTED_TILEJSON_URL = 'https://tiles.openfreemap.org/planet';
-const PMTILES_EXAMPLE_URL = 'https://pmtiles.io/protomaps(vector)ODbL_firenze.pmtiles';
 const defaultAreaPreset = areaPresets[0];
+const SLIPPY_VIEW_HEIGHT_TILES = 1;
+const PREVIEW_OVERSCAN_FACTOR = 1.45;
+const PREVIEW_PADDING = 24;
 
 const defaultSettings: Settings = {
-  areaPresetId: defaultAreaPreset.id,
-  sourceMode: 'hosted',
+  center: defaultAreaPreset.center,
   width: 96,
   height: 72,
   fabricCount: 14,
@@ -51,8 +60,7 @@ const defaultSettings: Settings = {
   includeMinorRoads: true,
   includePoiLabels: true,
   zoomHint: defaultAreaPreset.zoom,
-  tileSpan: defaultAreaPreset.tileSpan,
-  pmtilesUrl: PMTILES_EXAMPLE_URL,
+  pmtilesUrl: '',
 };
 
 function clampDimension(value: number, fallback: number): number {
@@ -67,35 +75,119 @@ function inches(stitches: number, fabricCount: number): string {
   return (stitches / fabricCount).toFixed(1);
 }
 
+function clampZoom(value: number): number {
+  return Math.min(16, Math.max(10, Math.round(value)));
+}
+
+function viewportBBox(
+  center: { lat: number; lon: number },
+  zoom: number,
+  width: number,
+  height: number,
+  overscanFactor = 1,
+): BBox {
+  const aspectRatio = Math.max(0.5, width / Math.max(1, height));
+  const world = lonLatToWorld(center.lon, center.lat, zoom);
+  const worldScale = 2 ** zoom;
+  const spanY = SLIPPY_VIEW_HEIGHT_TILES * overscanFactor;
+  const spanX = spanY * aspectRatio;
+  const minX = Math.max(0, Math.min(worldScale, world.x - spanX / 2));
+  const maxX = Math.max(0, Math.min(worldScale, world.x + spanX / 2));
+  const minY = Math.max(0, Math.min(worldScale, world.y - spanY / 2));
+  const maxY = Math.max(0, Math.min(worldScale, world.y + spanY / 2));
+  const northWest = worldToLonLat(minX, minY, zoom);
+  const southEast = worldToLonLat(maxX, maxY, zoom);
+
+  return {
+    minLon: northWest.lon,
+    minLat: southEast.lat,
+    maxLon: southEast.lon,
+    maxLat: northWest.lat,
+  };
+}
+
+function bboxIntersects(left: BBox, right: BBox): boolean {
+  return !(
+    left.maxLon < right.minLon ||
+    left.minLon > right.maxLon ||
+    left.maxLat < right.minLat ||
+    left.minLat > right.maxLat
+  );
+}
+
+function positionsBBox(positions: Position[]): BBox {
+  let minLon = positions[0][0];
+  let maxLon = positions[0][0];
+  let minLat = positions[0][1];
+  let maxLat = positions[0][1];
+
+  for (const [lon, lat] of positions) {
+    minLon = Math.min(minLon, lon);
+    maxLon = Math.max(maxLon, lon);
+    minLat = Math.min(minLat, lat);
+    maxLat = Math.max(maxLat, lat);
+  }
+
+  return { minLon, minLat, maxLon, maxLat };
+}
+
+function featureBBox(feature: MapFeature): BBox {
+  if (feature.type === 'point') {
+    const [lon, lat] = feature.coordinates;
+    return { minLon: lon, minLat: lat, maxLon: lon, maxLat: lat };
+  }
+
+  if (feature.type === 'line') {
+    return positionsBBox(feature.coordinates);
+  }
+
+  return positionsBBox(feature.coordinates.flat());
+}
+
+function filterFeaturesToBBox(features: MapFeature[], bbox: BBox): MapFeature[] {
+  return features.filter((feature) => bboxIntersects(featureBBox(feature), bbox));
+}
+
 export function App() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const previewViewportRef = useRef<HTMLDivElement | null>(null);
+  const dragRef = useRef<{
+    pointerId: number;
+    startMotion: PreviewMotion | null;
+    startX: number;
+    startY: number;
+  } | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>('chart');
+  const [isDraggingPreview, setIsDraggingPreview] = useState(false);
+  const [previewMotion, setPreviewMotion] = useState<PreviewMotion | null>(null);
   const [settings, setSettings] = useState<Settings>(defaultSettings);
   const deferredSettings = useDeferredValue(settings);
   const [sourceData, setSourceData] = useState<LoadedSourceData | null>(null);
   const [curation, setCuration] = useState<CurateFeaturesResult | null>(null);
   const [pattern, setPattern] = useState<PatternDocument | null>(null);
+  const [previewPattern, setPreviewPattern] = useState<PatternDocument | null>(null);
   const [sourceError, setSourceError] = useState<string | null>(null);
+  const [isRefreshingPreview, setIsRefreshingPreview] = useState(true);
   const [isPending, startTransition] = useTransition();
 
   useEffect(() => {
     let cancelled = false;
-    const areaPreset =
-      areaPresets.find((preset) => preset.id === deferredSettings.areaPresetId) ?? defaultAreaPreset;
-    const source =
-      deferredSettings.sourceMode === 'hosted'
-        ? new HostedVectorTileSource(HOSTED_TILEJSON_URL, 'OpenFreeMap')
-        : deferredSettings.sourceMode === 'pmtiles'
-          ? new PMTilesVectorSource(deferredSettings.pmtilesUrl)
-          : new DemoTileSource();
+    const source = new HostedVectorTileSource(HOSTED_TILEJSON_URL, 'OpenFreeMap');
 
     setSourceError(null);
+    setIsRefreshingPreview(true);
 
     source
       .load({
-        center: areaPreset.center,
+        bbox: viewportBBox(
+          deferredSettings.center,
+          deferredSettings.zoomHint,
+          deferredSettings.width,
+          deferredSettings.height,
+          PREVIEW_OVERSCAN_FACTOR,
+        ),
+        center: deferredSettings.center,
         zoomHint: deferredSettings.zoomHint,
-        tileSpan: deferredSettings.tileSpan,
       })
       .then((features) => {
         if (cancelled) {
@@ -116,7 +208,10 @@ export function App() {
           setSourceData(null);
           setCuration(null);
           setPattern(null);
+          setPreviewPattern(null);
           setSourceError(message);
+          setPreviewMotion(null);
+          setIsRefreshingPreview(false);
         });
       });
 
@@ -124,10 +219,9 @@ export function App() {
       cancelled = true;
     };
   }, [
-    deferredSettings.areaPresetId,
-    deferredSettings.pmtilesUrl,
-    deferredSettings.sourceMode,
-    deferredSettings.tileSpan,
+    deferredSettings.center,
+    deferredSettings.height,
+    deferredSettings.width,
     deferredSettings.zoomHint,
   ]);
 
@@ -137,10 +231,41 @@ export function App() {
     }
 
     startTransition(() => {
-      const curated = curateFeatures(sourceData.features, {
-        bbox: sourceData.bbox,
+      const currentViewportBBox = viewportBBox(
+        deferredSettings.center,
+        deferredSettings.zoomHint,
+        deferredSettings.width,
+        deferredSettings.height,
+      );
+      const previewViewportBBox = viewportBBox(
+        deferredSettings.center,
+        deferredSettings.zoomHint,
+        deferredSettings.width,
+        deferredSettings.height,
+        PREVIEW_OVERSCAN_FACTOR,
+      );
+      const previewWidth = Math.max(
+        deferredSettings.width + 8,
+        Math.round(deferredSettings.width * PREVIEW_OVERSCAN_FACTOR),
+      );
+      const previewHeight = Math.max(
+        deferredSettings.height + 8,
+        Math.round(deferredSettings.height * PREVIEW_OVERSCAN_FACTOR),
+      );
+      const actualFeatures = filterFeaturesToBBox(sourceData.features, currentViewportBBox);
+      const previewFeatures = filterFeaturesToBBox(sourceData.features, previewViewportBBox);
+
+      const curated = curateFeatures(actualFeatures, {
+        bbox: currentViewportBBox,
         width: deferredSettings.width,
         height: deferredSettings.height,
+        detailLevel: deferredSettings.detailLevel,
+        includeMinorRoads: deferredSettings.includeMinorRoads,
+      });
+      const previewCuration = curateFeatures(previewFeatures, {
+        bbox: previewViewportBBox,
+        width: previewWidth,
+        height: previewHeight,
         detailLevel: deferredSettings.detailLevel,
         includeMinorRoads: deferredSettings.includeMinorRoads,
       });
@@ -151,7 +276,18 @@ export function App() {
           title: `${sourceData.title} Pattern`,
           width: deferredSettings.width,
           height: deferredSettings.height,
-          bbox: sourceData.bbox,
+          bbox: currentViewportBBox,
+          includeMinorRoads: deferredSettings.includeMinorRoads,
+          includePoiLabels: deferredSettings.includePoiLabels,
+          backstitchSmoothing: deferredSettings.backstitchSmoothing,
+        }),
+      );
+      setPreviewPattern(
+        compilePattern(previewCuration.features, {
+          title: `${sourceData.title} Preview`,
+          width: previewWidth,
+          height: previewHeight,
+          bbox: previewViewportBBox,
           includeMinorRoads: deferredSettings.includeMinorRoads,
           includePoiLabels: deferredSettings.includePoiLabels,
           backstitchSmoothing: deferredSettings.backstitchSmoothing,
@@ -169,7 +305,7 @@ export function App() {
   ]);
 
   useEffect(() => {
-    if (!pattern || !canvasRef.current) {
+    if (!pattern || !previewPattern || !canvasRef.current) {
       return;
     }
 
@@ -179,12 +315,14 @@ export function App() {
         : Math.max(8, Math.min(18, Math.floor(920 / pattern.width)));
 
     if (viewMode === 'chart') {
-      drawChartPreview(canvasRef.current, pattern, cellSize);
-      return;
+      drawChartPreview(canvasRef.current, previewPattern, cellSize);
+    } else {
+      drawStitchPreview(canvasRef.current, previewPattern, cellSize);
     }
 
-    drawStitchPreview(canvasRef.current, pattern, cellSize);
-  }, [pattern, viewMode]);
+    setIsRefreshingPreview(false);
+    setPreviewMotion((current) => (current ? null : current));
+  }, [pattern, previewPattern, viewMode]);
 
   function updateSettings<K extends keyof Settings>(key: K, value: Settings[K]) {
     setSettings((current) => ({
@@ -193,18 +331,161 @@ export function App() {
     }));
   }
 
-  function applyAreaPreset(presetId: string) {
-    const preset = areaPresets.find((candidate) => candidate.id === presetId);
-    if (!preset) {
+  function applyPan(deltaX: number, deltaY: number) {
+    const viewport = previewViewportRef.current;
+    if (!viewport) {
+      return;
+    }
+
+    const width = Math.max(1, viewport.clientWidth);
+    const height = Math.max(1, viewport.clientHeight);
+
+    setSettings((current) => ({
+      ...current,
+      center: (() => {
+        const aspectRatio = Math.max(0.5, current.width / Math.max(1, current.height));
+        const spanY = SLIPPY_VIEW_HEIGHT_TILES;
+        const spanX = spanY * aspectRatio;
+        const worldScale = 2 ** current.zoomHint;
+        const currentWorld = lonLatToWorld(current.center.lon, current.center.lat, current.zoomHint);
+        const nextX = Math.min(
+          worldScale - 1e-6,
+          Math.max(0, currentWorld.x - (deltaX / width) * spanX),
+        );
+        const nextY = Math.min(
+          worldScale - 1e-6,
+          Math.max(0, currentWorld.y - (deltaY / height) * spanY),
+        );
+        return worldToLonLat(nextX, nextY, current.zoomHint);
+      })(),
+    }));
+  }
+
+  function handleCanvasPointerDown(event: ReactPointerEvent<HTMLCanvasElement>) {
+    dragRef.current = {
+      pointerId: event.pointerId,
+      startMotion: previewMotion,
+      startX: event.clientX,
+      startY: event.clientY,
+    };
+    setIsDraggingPreview(true);
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }
+
+  function handleCanvasPointerMove(event: ReactPointerEvent<HTMLCanvasElement>) {
+    if (!dragRef.current || dragRef.current.pointerId !== event.pointerId) {
+      return;
+    }
+
+    const startMotion = dragRef.current.startMotion ?? {
+      scale: 1,
+      translateX: 0,
+      translateY: 0,
+    };
+
+    setPreviewMotion({
+      scale: startMotion.scale,
+      translateX: startMotion.translateX + (event.clientX - dragRef.current.startX),
+      translateY: startMotion.translateY + (event.clientY - dragRef.current.startY),
+    });
+  }
+
+  function finishCanvasDrag(event: ReactPointerEvent<HTMLCanvasElement>) {
+    if (!dragRef.current || dragRef.current.pointerId !== event.pointerId) {
+      return;
+    }
+
+    const startMotion = dragRef.current.startMotion ?? {
+      scale: 1,
+      translateX: 0,
+      translateY: 0,
+    };
+    const deltaX = event.clientX - dragRef.current.startX;
+    const deltaY = event.clientY - dragRef.current.startY;
+    dragRef.current = null;
+    setIsDraggingPreview(false);
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+
+    if (Math.abs(deltaX) > 2 || Math.abs(deltaY) > 2) {
+      setPreviewMotion({
+        scale: startMotion.scale,
+        translateX: startMotion.translateX + deltaX,
+        translateY: startMotion.translateY + deltaY,
+      });
+      applyPan(deltaX, deltaY);
+      return;
+    }
+
+    setPreviewMotion(startMotion.scale === 1 && startMotion.translateX === 0 && startMotion.translateY === 0
+      ? null
+      : startMotion);
+  }
+
+  function handlePreviewWheel(event: ReactWheelEvent<HTMLElement>) {
+    event.preventDefault();
+
+    const viewport = previewViewportRef.current;
+    if (!viewport) {
+      return;
+    }
+
+    const rect = viewport.getBoundingClientRect();
+    const anchorX = event.clientX - rect.left;
+    const anchorY = event.clientY - rect.top;
+    const normalizedX = anchorX / Math.max(1, rect.width);
+    const normalizedY = anchorY / Math.max(1, rect.height);
+    const zoomDelta = event.deltaY < 0 ? 1 : -1;
+    const nextZoom = clampZoom(settings.zoomHint + zoomDelta);
+    if (nextZoom === settings.zoomHint) {
       return;
     }
 
     setSettings((current) => ({
       ...current,
-      areaPresetId: preset.id,
-      zoomHint: preset.zoom,
-      tileSpan: preset.tileSpan,
+      ...(() => {
+        const nextZoom = clampZoom(current.zoomHint + zoomDelta);
+        if (nextZoom === current.zoomHint) {
+          return { zoomHint: current.zoomHint, center: current.center };
+        }
+
+        const aspectRatio = Math.max(0.5, current.width / Math.max(1, current.height));
+        const oldSpanY = SLIPPY_VIEW_HEIGHT_TILES;
+        const oldSpanX = oldSpanY * aspectRatio;
+        const currentWorld = lonLatToWorld(current.center.lon, current.center.lat, current.zoomHint);
+        const worldX = currentWorld.x + (normalizedX - 0.5) * oldSpanX;
+        const worldY = currentWorld.y + (normalizedY - 0.5) * oldSpanY;
+        const focus = worldToLonLat(worldX, worldY, current.zoomHint);
+        const focusAtNextZoom = lonLatToWorld(focus.lon, focus.lat, nextZoom);
+        const nextSpanY = SLIPPY_VIEW_HEIGHT_TILES;
+        const nextSpanX = nextSpanY * aspectRatio;
+        const nextCenter = worldToLonLat(
+          focusAtNextZoom.x - (normalizedX - 0.5) * nextSpanX,
+          focusAtNextZoom.y - (normalizedY - 0.5) * nextSpanY,
+          nextZoom,
+        );
+
+        return {
+          zoomHint: nextZoom,
+          center: nextCenter,
+        };
+      })(),
     }));
+
+    const zoomFactor = 2 ** zoomDelta;
+    const currentMotion = previewMotion ?? {
+      scale: 1,
+      translateX: 0,
+      translateY: 0,
+    };
+    setPreviewMotion({
+      scale: currentMotion.scale * zoomFactor,
+      translateX:
+        (1 - zoomFactor) * (anchorX - previewBaseOffsetX) + zoomFactor * currentMotion.translateX,
+      translateY:
+        (1 - zoomFactor) * (anchorY - previewBaseOffsetY) + zoomFactor * currentMotion.translateY,
+    });
   }
 
   function handlePngExport() {
@@ -216,11 +497,7 @@ export function App() {
   }
 
   const legend = pattern?.legend ?? [];
-  const activeAreaPreset = areaPresets.find((preset) => preset.id === settings.areaPresetId) ?? defaultAreaPreset;
-  const title =
-    settings.sourceMode === 'demo'
-      ? sourceData?.title ?? 'Waiting for data'
-      : `${activeAreaPreset.label} · ${sourceData?.title ?? 'Loading source'}`;
+  const title = `${sourceData?.title ?? 'OpenFreeMap'} Selection`;
   const diagnostics = sourceData?.diagnostics;
   const sourceFeatureCount = sourceData?.features.length ?? 0;
   const curationStats = curation?.stats;
@@ -228,6 +505,31 @@ export function App() {
   const droppedFeatureCount = curationStats
     ? curationStats.originalCount - curationStats.curatedCount
     : 0;
+
+  const cellSize =
+    viewMode === 'chart'
+      ? Math.max(7, Math.min(14, Math.floor(860 / Math.max(1, settings.width))))
+      : Math.max(8, Math.min(18, Math.floor(920 / Math.max(1, settings.width))));
+  const previewViewportStyle =
+    pattern && previewPattern
+      ? {
+          width: pattern.width * cellSize + PREVIEW_PADDING * 2,
+          height: pattern.height * cellSize + PREVIEW_PADDING * 2,
+        }
+      : undefined;
+  const previewBaseOffsetX =
+    pattern && previewPattern ? -((previewPattern.width - pattern.width) * cellSize) / 2 : 0;
+  const previewBaseOffsetY =
+    pattern && previewPattern ? -((previewPattern.height - pattern.height) * cellSize) / 2 : 0;
+  const previewCanvasStyle =
+    pattern && previewPattern
+      ? {
+          transform: `translate(${previewBaseOffsetX + (previewMotion?.translateX ?? 0)}px, ${
+            previewBaseOffsetY + (previewMotion?.translateY ?? 0)
+          }px) scale(${previewMotion?.scale ?? 1})`,
+          transformOrigin: '0 0',
+        }
+      : undefined;
 
   return (
     <div className="app-shell">
@@ -242,114 +544,6 @@ export function App() {
         </div>
 
         <div className="control-group">
-          <div className="control-row">
-            <label htmlFor="dataset">Dataset</label>
-            <select
-              className="select"
-              id="dataset"
-              value={settings.sourceMode}
-              onChange={(event) => updateSettings('sourceMode', event.target.value as SourceMode)}
-            >
-              <option value="hosted">Hosted vector tiles</option>
-              <option value="pmtiles">Live PMTiles archive</option>
-              <option value="demo">Seattle-inspired demo</option>
-            </select>
-          </div>
-
-          {settings.sourceMode !== 'demo' ? (
-            <>
-              <div className="control-row">
-                <label htmlFor="area-preset">Area preset</label>
-                <select
-                  className="select"
-                  id="area-preset"
-                  value={settings.areaPresetId}
-                  onChange={(event) => applyAreaPreset(event.target.value)}
-                >
-                  {areaPresets.map((preset) => (
-                    <option key={preset.id} value={preset.id}>
-                      {preset.label}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              {settings.sourceMode === 'hosted' ? (
-                <div className="control-row">
-                  <label htmlFor="hosted-provider">Hosted source</label>
-                  <input
-                    className="input"
-                    id="hosted-provider"
-                    type="text"
-                    value="OpenFreeMap public vector tiles"
-                    disabled
-                  />
-                </div>
-              ) : null}
-
-              {settings.sourceMode === 'pmtiles' ? (
-                <div className="control-row">
-                  <label htmlFor="pmtiles-url">PMTiles URL</label>
-                  <input
-                    className="input"
-                    id="pmtiles-url"
-                    type="text"
-                    value={settings.pmtilesUrl}
-                    onChange={(event) => updateSettings('pmtilesUrl', event.target.value)}
-                  />
-                </div>
-              ) : null}
-
-              <div className="control-row">
-                <label htmlFor="zoom-hint">Tile zoom</label>
-                <div className="range-wrap">
-                  <input
-                    className="range-input"
-                    id="zoom-hint"
-                    type="range"
-                    min={10}
-                    max={16}
-                    step={1}
-                    value={settings.zoomHint}
-                    onChange={(event) => updateSettings('zoomHint', Number(event.target.value))}
-                  />
-                  <input
-                    className="number-input"
-                    type="number"
-                    min={10}
-                    max={16}
-                    value={settings.zoomHint}
-                    onChange={(event) => updateSettings('zoomHint', Number(event.target.value))}
-                  />
-                </div>
-              </div>
-
-              <div className="control-row">
-                <label htmlFor="tile-span">Tile span</label>
-                <div className="range-wrap">
-                  <input
-                    className="range-input"
-                    id="tile-span"
-                    type="range"
-                    min={1}
-                    max={4}
-                    step={1}
-                    value={settings.tileSpan}
-                    onChange={(event) => updateSettings('tileSpan', Number(event.target.value))}
-                  />
-                  <input
-                    className="number-input"
-                    type="number"
-                    min={1}
-                    max={4}
-                    value={settings.tileSpan}
-                    onChange={(event) => updateSettings('tileSpan', Number(event.target.value))}
-                  />
-                </div>
-              </div>
-            </>
-          ) : null}
-
           <div className="dimension-row">
             <div className="control-row">
               <label htmlFor="width">Pattern width</label>
@@ -531,21 +725,23 @@ export function App() {
           <div>
             <h2>{title}</h2>
             <p>
-              {settings.sourceMode === 'hosted'
-                ? 'Rendering from a hosted global vector source so you can inspect familiar Seattle geometry without downloading an archive first.'
-                : settings.sourceMode === 'pmtiles'
-                  ? 'Rendering directly from a PMTiles archive so we can study the real vector layers that need stitch-friendly simplification.'
-                  : 'The local demo remains here as a stable fallback while the live tile path gets sharper.'}
+              Drag the preview to pan and use the mouse wheel to zoom. We are
+              rendering directly from OpenFreeMap so choosing the area to stitch
+              feels more like navigating a map than picking from presets.
             </p>
           </div>
           <div className="hint">
-            {isPending
+            {isPending || isRefreshingPreview
               ? 'Refreshing pattern preview...'
-              : `${settings.width} × ${settings.height} stitches, ${legend.length} legend entries`}
+              : `Zoom ${settings.zoomHint} · ${settings.width} × ${settings.height} stitches, ${legend.length} legend entries`}
           </div>
         </div>
 
-        <section className="preview-frame" aria-label="Pattern preview">
+        <section
+          className="preview-frame interactive"
+          aria-label="Pattern preview"
+          onWheel={handlePreviewWheel}
+        >
           <div className="preview-center">
             {sourceError ? (
               <div className="empty-state">
@@ -553,7 +749,26 @@ export function App() {
                 <div>{sourceError}</div>
               </div>
             ) : pattern ? (
-              <canvas className="preview-canvas" ref={canvasRef} />
+              <div
+                className="preview-viewport"
+                ref={previewViewportRef}
+                style={previewViewportStyle}
+              >
+                <div className="preview-overlay">
+                  {isRefreshingPreview ? 'Updating preview...' : 'Drag to pan. Scroll to zoom.'}
+                </div>
+                <canvas
+                  className={`preview-canvas ${
+                    isDraggingPreview ? 'dragging' : 'draggable'
+                  } ${isRefreshingPreview ? 'updating' : ''}`}
+                  ref={canvasRef}
+                  onPointerDown={handleCanvasPointerDown}
+                  onPointerMove={handleCanvasPointerMove}
+                  onPointerUp={finishCanvasDrag}
+                  onPointerCancel={finishCanvasDrag}
+                  style={previewCanvasStyle}
+                />
+              </div>
             ) : (
               <div className="empty-state">Preparing the first chart preview.</div>
             )}

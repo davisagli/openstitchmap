@@ -14,6 +14,11 @@ export interface TileRange {
   z: number;
 }
 
+export interface WorldCoordinate {
+  x: number;
+  y: number;
+}
+
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
@@ -23,17 +28,32 @@ function clampLatitude(lat: number): number {
 }
 
 export function lonLatToTile(lon: number, lat: number, zoom: number): TileCoordinate {
-  const latRadians = (clampLatitude(lat) * Math.PI) / 180;
   const scale = 2 ** zoom;
-  const x = Math.floor(((lon + 180) / 360) * scale);
-  const y = Math.floor(
-    ((1 - Math.log(Math.tan(latRadians) + 1 / Math.cos(latRadians)) / Math.PI) / 2) * scale,
-  );
+  const world = lonLatToWorld(lon, lat, zoom);
+  const x = Math.floor(world.x);
+  const y = Math.floor(world.y);
 
   return {
     x: clamp(x, 0, scale - 1),
     y: clamp(y, 0, scale - 1),
     z: zoom,
+  };
+}
+
+export function lonLatToWorld(lon: number, lat: number, zoom: number): WorldCoordinate {
+  const latRadians = (clampLatitude(lat) * Math.PI) / 180;
+  const scale = 2 ** zoom;
+
+  return {
+    x: ((lon + 180) / 360) * scale,
+    y: ((1 - Math.log(Math.tan(latRadians) + 1 / Math.cos(latRadians)) / Math.PI) / 2) * scale,
+  };
+}
+
+export function worldToLonLat(x: number, y: number, zoom: number): { lon: number; lat: number } {
+  return {
+    lon: tileToLon(x, zoom),
+    lat: tileToLat(y, zoom),
   };
 }
 
