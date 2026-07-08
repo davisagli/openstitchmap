@@ -7,12 +7,17 @@ import { HostedVectorTileSource } from '../core/tiles/hostedVectorSource';
 import { lonLatToWorld, worldToLonLat } from '../core/tiles/mercator';
 import { areaPresets } from '../core/tiles/presets';
 import {
-  compilePattern,
+  buildPatternDocument,
   classifyLine,
   classifyMarker,
   classifyPolygon,
+  compilePatternCells,
+  compilePatternOverlays,
+  type CompilePatternOptions,
   type LegendEntry,
+  type PatternCell,
   type PatternDocument,
+  type PatternOverlayData,
 } from '../core/pattern/compilePattern';
 import {
   curateFeatures,
@@ -42,6 +47,28 @@ interface Settings {
   detailLevel: DetailLevel;
   zoomHint: number;
   pmtilesUrl: string;
+}
+
+interface PreparedPatternVariant {
+  curation: CurateFeaturesResult;
+  options: CompilePatternOptions;
+}
+
+interface PreparedViewportData {
+  actual: PreparedPatternVariant;
+  preview: PreparedPatternVariant;
+}
+
+interface CompiledPatternVariant extends PreparedPatternVariant {
+  baseCells: PatternCell[][];
+  baseOverlays: PatternOverlayData;
+  basePattern: PatternDocument;
+}
+
+interface CompiledViewportData {
+  actual: CompiledPatternVariant;
+  preview: CompiledPatternVariant;
+  availableLegend: LegendEntry[];
 }
 
 const HOSTED_TILEJSON_URL = 'https://tiles.openfreemap.org/planet';
@@ -179,6 +206,60 @@ function filterFeaturesByLegendSelection(features: MapFeature[], hiddenEntries: 
   });
 }
 
+function hasHiddenLegendMode(hiddenEntries: Set<string>, mode: LegendEntry['mode']): boolean {
+  for (const key of hiddenEntries) {
+    if (key.startsWith(`${mode}:`)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function filterBackstitchesByLegendSelection(
+  backstitches: PatternOverlayData['backstitches'],
+  hiddenEntries: Set<string>,
+) {
+  if (!hasHiddenLegendMode(hiddenEntries, 'line')) {
+    return backstitches;
+  }
+
+  return backstitches.filter((segment) => !hiddenEntries.has(`line:${segment.kind}`));
+}
+
+function filterMarkersByLegendSelection(markers: PatternOverlayData['markers'], hiddenEntries: Set<string>) {
+  if (!hasHiddenLegendMode(hiddenEntries, 'marker')) {
+    return markers;
+  }
+
+  return markers.filter((marker) => !hiddenEntries.has(`marker:${marker.kind}`));
+}
+
+function buildVisiblePattern(
+  variant: CompiledPatternVariant,
+  hiddenEntries: Set<string>,
+): PatternDocument {
+  if (!hiddenEntries.size) {
+    return variant.basePattern;
+  }
+
+  const backstitches = filterBackstitchesByLegendSelection(variant.baseOverlays.backstitches, hiddenEntries);
+  const markers = filterMarkersByLegendSelection(variant.baseOverlays.markers, hiddenEntries);
+  const cells = hasHiddenLegendMode(hiddenEntries, 'fill')
+    ? compilePatternCells(filterFeaturesByLegendSelection(variant.curation.features, hiddenEntries), variant.options)
+    : variant.baseCells;
+
+  return buildPatternDocument({
+    title: variant.options.title,
+    width: variant.options.width,
+    height: variant.options.height,
+    bbox: variant.options.bbox,
+    cells,
+    backstitches,
+    markers,
+  });
+}
+
 export function App() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const previewViewportRef = useRef<HTMLDivElement | null>(null);
@@ -194,6 +275,8 @@ export function App() {
   const [settings, setSettings] = useState<Settings>(defaultSettings);
   const deferredSettings = useDeferredValue(settings);
   const [sourceData, setSourceData] = useState<LoadedSourceData | null>(null);
+  const [preparedViewport, setPreparedViewport] = useState<PreparedViewportData | null>(null);
+  const [compiledViewport, setCompiledViewport] = useState<CompiledViewportData | null>(null);
   const [curation, setCuration] = useState<CurateFeaturesResult | null>(null);
   const [availableLegend, setAvailableLegend] = useState<LegendEntry[]>([]);
   const [hiddenLegendEntries, setHiddenLegendEntries] = useState<Set<string>>(new Set());
@@ -239,6 +322,8 @@ export function App() {
         const message = error instanceof Error ? error.message : 'Unable to load the selected source.';
         startTransition(() => {
           setSourceData(null);
+          setPreparedViewport(null);
+          setCompiledViewport(null);
           setCuration(null);
           setPattern(null);
           setPreviewPattern(null);
@@ -263,91 +348,151 @@ export function App() {
       return;
     }
 
-    startTransition(() => {
-      const currentViewportBBox = viewportBBox(
-        deferredSettings.center,
-        deferredSettings.zoomHint,
-        deferredSettings.width,
-        deferredSettings.height,
-      );
-      const previewViewportBBox = viewportBBox(
-        deferredSettings.center,
-        deferredSettings.zoomHint,
-        deferredSettings.width,
-        deferredSettings.height,
-        PREVIEW_OVERSCAN_FACTOR,
-      );
-      const previewWidth = Math.max(
-        deferredSettings.width + 8,
-        Math.round(deferredSettings.width * PREVIEW_OVERSCAN_FACTOR),
-      );
-      const previewHeight = Math.max(
-        deferredSettings.height + 8,
-        Math.round(deferredSettings.height * PREVIEW_OVERSCAN_FACTOR),
-      );
-      const actualFeatures = filterFeaturesToBBox(sourceData.features, currentViewportBBox);
-      const previewFeatures = filterFeaturesToBBox(sourceData.features, previewViewportBBox);
+    setIsRefreshingPreview(true);
 
-      const curated = curateFeatures(actualFeatures, {
+    const currentViewportBBox = viewportBBox(
+      deferredSettings.center,
+      deferredSettings.zoomHint,
+      deferredSettings.width,
+      deferredSettings.height,
+    );
+    const previewViewportBBox = viewportBBox(
+      deferredSettings.center,
+      deferredSettings.zoomHint,
+      deferredSettings.width,
+      deferredSettings.height,
+      PREVIEW_OVERSCAN_FACTOR,
+    );
+    const previewWidth = Math.max(
+      deferredSettings.width + 8,
+      Math.round(deferredSettings.width * PREVIEW_OVERSCAN_FACTOR),
+    );
+    const previewHeight = Math.max(
+      deferredSettings.height + 8,
+      Math.round(deferredSettings.height * PREVIEW_OVERSCAN_FACTOR),
+    );
+    const actualFeatures = filterFeaturesToBBox(sourceData.features, currentViewportBBox);
+    const previewFeatures = filterFeaturesToBBox(sourceData.features, previewViewportBBox);
+
+    const actual = {
+      curation: curateFeatures(actualFeatures, {
         bbox: currentViewportBBox,
         width: deferredSettings.width,
         height: deferredSettings.height,
         detailLevel: deferredSettings.detailLevel,
         includeMinorRoads: true,
-      });
-      const previewCuration = curateFeatures(previewFeatures, {
-        bbox: previewViewportBBox,
-        width: previewWidth,
-        height: previewHeight,
-        detailLevel: deferredSettings.detailLevel,
-        includeMinorRoads: true,
-      });
-      const fullPattern = compilePattern(curated.features, {
+      }),
+      options: {
         title: `${sourceData.title} Pattern`,
         width: deferredSettings.width,
         height: deferredSettings.height,
         bbox: currentViewportBBox,
         includeMinorRoads: true,
-      });
-      const filteredCuratedFeatures = filterFeaturesByLegendSelection(
-        curated.features,
-        hiddenLegendEntries,
-      );
-      const filteredPreviewFeatures = filterFeaturesByLegendSelection(
-        previewCuration.features,
-        hiddenLegendEntries,
-      );
+      },
+    };
+    const preview = {
+      curation: curateFeatures(previewFeatures, {
+        bbox: previewViewportBBox,
+        width: previewWidth,
+        height: previewHeight,
+        detailLevel: deferredSettings.detailLevel,
+        includeMinorRoads: true,
+      }),
+      options: {
+        title: `${sourceData.title} Preview`,
+        width: previewWidth,
+        height: previewHeight,
+        bbox: previewViewportBBox,
+        includeMinorRoads: true,
+      },
+    };
 
-      setCuration(curated);
-      setAvailableLegend(fullPattern.legend.filter(isInteractiveLegendEntry));
-      setPattern(
-        hiddenLegendEntries.size
-          ? compilePattern(filteredCuratedFeatures, {
-              title: `${sourceData.title} Pattern`,
-              width: deferredSettings.width,
-              height: deferredSettings.height,
-              bbox: currentViewportBBox,
-              includeMinorRoads: true,
-            })
-          : fullPattern,
-      );
-      setPreviewPattern(
-        compilePattern(filteredPreviewFeatures, {
-          title: `${sourceData.title} Preview`,
-          width: previewWidth,
-          height: previewHeight,
-          bbox: previewViewportBBox,
-          includeMinorRoads: true,
-        }),
-      );
+    startTransition(() => {
+      setCuration(actual.curation);
+      setPreparedViewport({ actual, preview });
     });
   }, [
     deferredSettings.detailLevel,
     deferredSettings.height,
     deferredSettings.width,
-    hiddenLegendEntries,
     sourceData,
   ]);
+
+  useEffect(() => {
+    if (!preparedViewport) {
+      return;
+    }
+
+    const actualBaseCells = compilePatternCells(
+      preparedViewport.actual.curation.features,
+      preparedViewport.actual.options,
+    );
+    const actualBaseOverlays = compilePatternOverlays(
+      preparedViewport.actual.curation.features,
+      preparedViewport.actual.options,
+    );
+    const actualBasePattern = buildPatternDocument({
+      title: preparedViewport.actual.options.title,
+      width: preparedViewport.actual.options.width,
+      height: preparedViewport.actual.options.height,
+      bbox: preparedViewport.actual.options.bbox,
+      cells: actualBaseCells,
+      backstitches: actualBaseOverlays.backstitches,
+      markers: actualBaseOverlays.markers,
+    });
+    const previewBaseCells = compilePatternCells(
+      preparedViewport.preview.curation.features,
+      preparedViewport.preview.options,
+    );
+    const previewBaseOverlays = compilePatternOverlays(
+      preparedViewport.preview.curation.features,
+      preparedViewport.preview.options,
+    );
+    const previewBasePattern = buildPatternDocument({
+      title: preparedViewport.preview.options.title,
+      width: preparedViewport.preview.options.width,
+      height: preparedViewport.preview.options.height,
+      bbox: preparedViewport.preview.options.bbox,
+      cells: previewBaseCells,
+      backstitches: previewBaseOverlays.backstitches,
+      markers: previewBaseOverlays.markers,
+    });
+
+    startTransition(() => {
+      setAvailableLegend(actualBasePattern.legend.filter(isInteractiveLegendEntry));
+      setCompiledViewport({
+        actual: {
+          ...preparedViewport.actual,
+          baseCells: actualBaseCells,
+          baseOverlays: actualBaseOverlays,
+          basePattern: actualBasePattern,
+        },
+        preview: {
+          ...preparedViewport.preview,
+          baseCells: previewBaseCells,
+          baseOverlays: previewBaseOverlays,
+          basePattern: previewBasePattern,
+        },
+        availableLegend: actualBasePattern.legend.filter(isInteractiveLegendEntry),
+      });
+    });
+  }, [preparedViewport]);
+
+  useEffect(() => {
+    if (!compiledViewport) {
+      return;
+    }
+
+    setIsRefreshingPreview(true);
+
+    const nextPattern = buildVisiblePattern(compiledViewport.actual, hiddenLegendEntries);
+    const nextPreviewPattern = buildVisiblePattern(compiledViewport.preview, hiddenLegendEntries);
+
+    startTransition(() => {
+      setPattern(nextPattern);
+      setPreviewPattern(nextPreviewPattern);
+    });
+  }, [compiledViewport, hiddenLegendEntries]);
 
   useEffect(() => {
     if (!pattern || !previewPattern || !canvasRef.current) {
