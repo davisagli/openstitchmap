@@ -40,21 +40,28 @@
 - The legend is now the primary feature-filter UI:
   - single container, ordered as fills first, then ways, then POIs
   - each legend card is a toggle button
-  - toggling a legend item recompiles the pattern without that fill/line/marker class
+  - line and marker toggles now reuse compiled overlays instead of re-running the full pipeline
+  - fill toggles still rebuild cells, but no longer re-run curation or overlay compilation
 - Source diagnostics live at the bottom in a collapsed `<details>` section with a short summary line.
+- Rendering performance is materially better than the previous pass:
+  - polygon fills are projected once and sampled through a per-cell polygon index
+  - the fifth center sample is now lazy and only runs for mixed cells that need a tiebreaker
+  - preview/chart updates are staged as curate -> compile base assets -> apply legend visibility
 
 ## Important files
 
 - `src/app/App.tsx`
   - Main UI and data-loading flow.
   - Implements slippy-map pan/zoom behavior.
-  - Runs `curateFeatures(...)` before `compilePattern(...)`.
-  - Applies legend-toggle filtering before final compilation.
+  - Splits expensive work into prepared viewport data, compiled base assets, and visible pattern derivation.
+  - Line/marker legend toggles now filter cached overlays; fill toggles recompile cells only.
 - `src/core/pattern/curateFeatures.ts`
   - Main stitch-aware filtering / simplification pass.
   - Contains polygon filtering, marker budgeting, line thinning, snapped road graph logic, graph-role heuristics, and primary-corridor collapse.
 - `src/core/pattern/compilePattern.ts`
   - Compiles curated features into pattern cells / backstitch / markers.
+  - Polygon fill compilation now operates in projected grid space with a cell-local polygon index.
+  - Exposes split helpers for cells, overlays, and final document assembly.
   - Also contains backstitch path snapping + simplification.
   - Contains the conservative 3/4-stitch eligibility pass for polygon fills.
   - Backstitch smoothing is no longer user-configurable; the previous balanced behavior is now the fixed behavior.
@@ -121,28 +128,32 @@
 - The slippy map still works on a stitch-grid abstraction, not true continuous cartographic rendering, so motion can feel a little approximate when rerenders are fast/slow.
 - The realistic fabric/floss treatment is still experimental and may need tuning across
   palettes, pattern dimensions, and display pixel densities.
+- `chart -> stitched` is still noticeably slower than the reverse direction, so the draw path is now the next obvious bottleneck.
 
 ## Most promising next steps
 
-1. Continue tuning fractional-fill heuristics:
+1. Attack remaining preview draw cost:
+   - cache rendered chart/stitched layers or pre-render to offscreen surfaces
+   - consider moving compile/curation to a worker if interaction latency is still noticeable under heavier views
+2. Continue tuning fractional-fill heuristics:
    - inspect cases where the new adjacency rule is too strict or too loose
    - consider whether different fill classes should allow different fractional-stitch aggressiveness
-2. Continue road-role diagnostics in the UI:
+3. Continue road-role diagnostics in the UI:
    - counts for `corridor`, `connector`, `duplicate`, `local`
    - maybe a short textual explanation of the current graph pass
-3. Improve graph-role scoring around links/ramps:
+4. Improve graph-role scoring around links/ramps:
    - better distinguish “useful join into arterial” from “parallel lane fragment”
-4. Split duplicate handling into:
+5. Split duplicate handling into:
    - “merge into corridor”
    - “discard outright”
-5. Make primary corridor selection more corridor-aware at junctions:
+6. Make primary corridor selection more corridor-aware at junctions:
    - choose a corridor spine through major nodes, not just pairwise similarity
-6. Consider making road-graph heuristics inspect `class`, `subclass`, or `*_link` values more directly in the importance score.
-7. If UI polish continues:
+7. Consider making road-graph heuristics inspect `class`, `subclass`, or `*_link` values more directly in the importance score.
+8. If UI polish continues:
    - consider slightly tightening the workspace intro text
    - consider whether diagnostics summary belongs inline with legend/footer copy instead of as its own row
    - consider a future export surface beyond PNG once the pattern format stabilizes
-8. Continue validating the realistic stitched treatment:
+9. Continue validating the realistic stitched treatment:
    - check whether floss coverage stays convincing at unusually small or large pattern widths
    - tune fabric texture and stitch depth if lighter palettes lose contrast
 
@@ -171,7 +182,7 @@
 
 ## Last validated state
 
-- In-browser target: `http://127.0.0.1:5173/`
+- In-browser target: `http://127.0.0.1:4174/`
 - Last manually checked state:
   - OpenFreeMap Seattle waterfront default
   - stitch detail: medium
@@ -182,11 +193,20 @@
   - legend order: fills, then ways, then POIs
   - legend cards are compact and show DMC floss codes
   - extra vertical space sits below the legend rather than inflating the preview frame
+  - render interactions were re-checked after the performance pass
 - Build status:
   - `npm run build` passed
+- Directional local timings after the latest pass:
+  - chart -> stitched: ~1.14s
+  - stitched -> chart: ~0.25s
+  - hide Primary Road: ~1.16s
+  - show Primary Road: ~0.81s
 
 ## Recent commits
 
+- `74d256b` - `Improve rendering performance`
+- `518c7ee` - `Make fabric count a radio choice`
+- `c120d49` - `Improve stitched product preview`
 - `b62b28e` - `Add 3/4 stitches to smooth contours`
 - `7a5685c` - `Update project handoff`
 - `cbfb35d` - `Refine stitch preview UI`

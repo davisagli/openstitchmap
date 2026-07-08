@@ -89,9 +89,18 @@ export interface CompilePatternOptions {
   includeMinorRoads: boolean;
 }
 
-interface StyledPolygon {
-  feature: PolygonFeature;
+export interface PatternOverlayData {
+  backstitches: BackstitchSegment[];
+  markers: PatternMarker[];
+}
+
+interface ProjectedPolygon {
   style: FillStyle;
+  rings: GridPoint[][];
+  minX: number;
+  maxX: number;
+  minY: number;
+  maxY: number;
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -203,15 +212,15 @@ function snapAndSimplifyLine(
   return indexes.map((index) => snapped[index]);
 }
 
-function pointInRing(point: Position, ring: Position[]): boolean {
+function pointInRing(point: GridPoint, ring: GridPoint[]): boolean {
   let inside = false;
 
   for (let i = 0, j = ring.length - 1; i < ring.length; j = i, i += 1) {
-    const [xi, yi] = ring[i];
-    const [xj, yj] = ring[j];
+    const { x: xi, y: yi } = ring[i];
+    const { x: xj, y: yj } = ring[j];
     const intersects =
-      yi > point[1] !== yj > point[1] &&
-      point[0] < ((xj - xi) * (point[1] - yi)) / (yj - yi || 1e-9) + xi;
+      yi > point.y !== yj > point.y &&
+      point.x < ((xj - xi) * (point.y - yi)) / (yj - yi || 1e-9) + xi;
 
     if (intersects) {
       inside = !inside;
@@ -221,7 +230,7 @@ function pointInRing(point: Position, ring: Position[]): boolean {
   return inside;
 }
 
-function pointInPolygon(point: Position, rings: Position[][]): boolean {
+function pointInPolygon(point: GridPoint, rings: GridPoint[][]): boolean {
   if (!rings.length || !pointInRing(point, rings[0])) {
     return false;
   }
@@ -245,33 +254,83 @@ function projectToGrid(point: Position, bbox: BBox, width: number, height: numbe
   };
 }
 
-function cellCenterToPosition(x: number, y: number, bbox: BBox, width: number, height: number): Position {
-  return [
-    bbox.minLon + ((x + 0.5) / width) * (bbox.maxLon - bbox.minLon),
-    bbox.maxLat - ((y + 0.5) / height) * (bbox.maxLat - bbox.minLat),
-  ];
+function projectedRingBounds(ring: GridPoint[]): Pick<ProjectedPolygon, 'minX' | 'maxX' | 'minY' | 'maxY'> {
+  let minX = ring[0].x;
+  let maxX = ring[0].x;
+  let minY = ring[0].y;
+  let maxY = ring[0].y;
+
+  for (const point of ring) {
+    minX = Math.min(minX, point.x);
+    maxX = Math.max(maxX, point.x);
+    minY = Math.min(minY, point.y);
+    maxY = Math.max(maxY, point.y);
+  }
+
+  return { minX, maxX, minY, maxY };
 }
 
-function cellOffsetToPosition(
-  x: number,
-  y: number,
-  offsetX: number,
-  offsetY: number,
+function projectPolygon(
+  feature: PolygonFeature,
+  style: FillStyle,
   bbox: BBox,
   width: number,
   height: number,
-): Position {
-  return [
-    bbox.minLon + ((x + offsetX) / width) * (bbox.maxLon - bbox.minLon),
-    bbox.maxLat - ((y + offsetY) / height) * (bbox.maxLat - bbox.minLat),
-  ];
+): ProjectedPolygon {
+  const rings = feature.coordinates.map((ring) => ring.map((point) => projectToGrid(point, bbox, width, height)));
+  const bounds = rings
+    .map(projectedRingBounds)
+    .reduce(
+      (current, ring) => ({
+        minX: Math.min(current.minX, ring.minX),
+        maxX: Math.max(current.maxX, ring.maxX),
+        minY: Math.min(current.minY, ring.minY),
+        maxY: Math.max(current.maxY, ring.maxY),
+      }),
+      {
+        minX: Number.POSITIVE_INFINITY,
+        maxX: Number.NEGATIVE_INFINITY,
+        minY: Number.POSITIVE_INFINITY,
+        maxY: Number.NEGATIVE_INFINITY,
+      },
+    );
+
+  return {
+    style,
+    rings,
+    ...bounds,
+  };
 }
 
-function styleAtPosition(point: Position, polygons: StyledPolygon[]): FillStyle {
+function buildPolygonCellIndex(polygons: ProjectedPolygon[], width: number, height: number): number[][][] {
+  const cells = Array.from({ length: height }, () => Array.from({ length: width }, () => [] as number[]));
+
+  polygons.forEach((polygon, polygonIndex) => {
+    if (polygon.maxX <= 0 || polygon.minX >= width || polygon.maxY <= 0 || polygon.minY >= height) {
+      return;
+    }
+
+    const minX = clamp(Math.floor(polygon.minX), 0, width - 1);
+    const maxX = clamp(Math.ceil(polygon.maxX) - 1, 0, width - 1);
+    const minY = clamp(Math.floor(polygon.minY), 0, height - 1);
+    const maxY = clamp(Math.ceil(polygon.maxY) - 1, 0, height - 1);
+
+    for (let y = minY; y <= maxY; y += 1) {
+      for (let x = minX; x <= maxX; x += 1) {
+        cells[y][x].push(polygonIndex);
+      }
+    }
+  });
+
+  return cells;
+}
+
+function styleAtGridPosition(point: GridPoint, polygons: ProjectedPolygon[], polygonIndexes: number[]): FillStyle {
   let fill = fillStyles.ground;
 
-  for (const polygon of polygons) {
-    if (pointInPolygon(point, polygon.feature.coordinates)) {
+  for (const polygonIndex of polygonIndexes) {
+    const polygon = polygons[polygonIndex];
+    if (pointInPolygon(point, polygon.rings)) {
       fill = polygon.style;
     }
   }
@@ -426,6 +485,13 @@ export function classifyPolygon(feature: PolygonFeature): FillStyle | null {
   return null;
 }
 
+const cellSampleOffsets: Array<[PatternCellCorner, number, number]> = [
+  ['topLeft', 0.25, 0.25],
+  ['topRight', 0.75, 0.25],
+  ['bottomLeft', 0.25, 0.75],
+  ['bottomRight', 0.75, 0.75],
+];
+
 export function classifyLine(feature: LineFeature): LineStyleId | null {
   const highway = feature.tags.highway;
 
@@ -569,48 +635,41 @@ function buildLegend(
   return legend.sort((left, right) => left.label.localeCompare(right.label));
 }
 
-export function compilePattern(
+export function compilePatternCells(
   features: MapFeature[],
   options: CompilePatternOptions,
-): PatternDocument {
-  const polygons: StyledPolygon[] = features
+): PatternCell[][] {
+  const polygons: ProjectedPolygon[] = features
     .filter((feature): feature is PolygonFeature => feature.type === 'polygon')
     .map((feature) => {
       const style = classifyPolygon(feature);
-      return style ? { feature, style } : null;
+      return style ? projectPolygon(feature, style, options.bbox, options.width, options.height) : null;
     })
-    .filter((item): item is StyledPolygon => item !== null)
+    .filter((item): item is ProjectedPolygon => item !== null)
     .sort((left, right) => left.style.priority - right.style.priority);
+  const polygonCellIndex = buildPolygonCellIndex(polygons, options.width, options.height);
 
   const cells: PatternCell[][] = Array.from({ length: options.height }, (_, y) =>
     Array.from({ length: options.width }, (_, x) => {
-      const sampleOffsets: Array<[PatternCellCorner, number, number]> = [
-        ['topLeft', 0.25, 0.25],
-        ['topRight', 0.75, 0.25],
-        ['bottomLeft', 0.25, 0.75],
-        ['bottomRight', 0.75, 0.75],
-      ];
-      const samples = sampleOffsets.map(([corner, offsetX, offsetY]) =>
+      const polygonIndexes = polygonCellIndex[y][x];
+      const samples = cellSampleOffsets.map(([corner, offsetX, offsetY]) =>
         sampleFromStyle(
-          styleAtPosition(
-            cellOffsetToPosition(x, y, offsetX, offsetY, options.bbox, options.width, options.height),
+          styleAtGridPosition(
+            { x: x + offsetX, y: y + offsetY },
             polygons,
+            polygonIndexes,
           ),
           corner,
         ),
       );
       const fill = dominantStyle(samples);
-      const centerFill = sampleFromStyle(
-        styleAtPosition(
-          cellCenterToPosition(x, y, options.bbox, options.width, options.height),
-          polygons,
-        ),
-        fill.corner,
-      );
       const isUniform = samples.every((sample) => sample.fill === samples[0].fill);
       const fraction = isUniform ? null : threeQuarterFraction(samples);
-      const displayFill =
-        isUniform || fraction ? fill : centerFill.fill === fill.fill ? fill : centerFill;
+      const centerFill =
+        isUniform || fraction
+          ? null
+          : sampleFromStyle(styleAtGridPosition({ x: x + 0.5, y: y + 0.5 }, polygons, polygonIndexes), fill.corner);
+      const displayFill = !centerFill || centerFill.fill === fill.fill ? fill : centerFill;
 
       return {
         fill: displayFill.fill,
@@ -623,7 +682,7 @@ export function compilePattern(
     }),
   );
 
-  const refinedCells = cells.map((row, y) =>
+  return cells.map((row, y) =>
     row.map((cell, x) => {
       if (!cell.fractional || supportsThreeQuarterFraction(cells, x, y, cell.fractional)) {
         return cell;
@@ -635,7 +694,12 @@ export function compilePattern(
       };
     }),
   );
+}
 
+export function compilePatternOverlays(
+  features: MapFeature[],
+  options: CompilePatternOptions,
+): PatternOverlayData {
   const backstitches: BackstitchSegment[] = [];
   const markers: PatternMarker[] = [];
 
@@ -703,13 +767,40 @@ export function compilePattern(
   }
 
   return {
+    backstitches,
+    markers,
+  };
+}
+
+export function buildPatternDocument(
+  options: Pick<PatternDocument, 'title' | 'width' | 'height' | 'bbox' | 'cells' | 'backstitches' | 'markers'>,
+): PatternDocument {
+  return {
     title: options.title,
     width: options.width,
     height: options.height,
     bbox: options.bbox,
-    cells: refinedCells,
-    backstitches,
-    markers,
-    legend: buildLegend(refinedCells, backstitches, markers),
+    cells: options.cells,
+    backstitches: options.backstitches,
+    markers: options.markers,
+    legend: buildLegend(options.cells, options.backstitches, options.markers),
   };
+}
+
+export function compilePattern(
+  features: MapFeature[],
+  options: CompilePatternOptions,
+): PatternDocument {
+  const cells = compilePatternCells(features, options);
+  const overlays = compilePatternOverlays(features, options);
+
+  return buildPatternDocument({
+    title: options.title,
+    width: options.width,
+    height: options.height,
+    bbox: options.bbox,
+    cells,
+    backstitches: overlays.backstitches,
+    markers: overlays.markers,
+  });
 }
