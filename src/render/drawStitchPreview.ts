@@ -1,4 +1,4 @@
-import type { PatternDocument } from '../core/pattern/compilePattern';
+import type { PatternCellCorner, PatternDocument } from '../core/pattern/compilePattern';
 
 function setupCanvas(canvas: HTMLCanvasElement, width: number, height: number): CanvasRenderingContext2D {
   const ratio = window.devicePixelRatio || 1;
@@ -40,6 +40,151 @@ function drawFrenchKnot(
   context.fill();
 }
 
+function drawCross(
+  context: CanvasRenderingContext2D,
+  left: number,
+  top: number,
+  size: number,
+  color: string,
+  lineWidth: number,
+): void {
+  const margin = Math.max(0.8, size * 0.18);
+  context.strokeStyle = color;
+  context.lineWidth = lineWidth;
+  context.lineCap = 'round';
+  context.beginPath();
+  context.moveTo(left + margin, top + margin);
+  context.lineTo(left + size - margin, top + size - margin);
+  context.moveTo(left + size - margin, top + margin);
+  context.lineTo(left + margin, top + size - margin);
+  context.stroke();
+}
+
+function cornerPoint(
+  left: number,
+  top: number,
+  size: number,
+  corner: PatternCellCorner,
+): { x: number; y: number } {
+  switch (corner) {
+    case 'topLeft':
+      return { x: left, y: top };
+    case 'topRight':
+      return { x: left + size, y: top };
+    case 'bottomLeft':
+      return { x: left, y: top + size };
+    case 'bottomRight':
+      return { x: left + size, y: top + size };
+  }
+}
+
+function oppositeCorner(corner: PatternCellCorner): PatternCellCorner {
+  switch (corner) {
+    case 'topLeft':
+      return 'bottomRight';
+    case 'topRight':
+      return 'bottomLeft';
+    case 'bottomLeft':
+      return 'topRight';
+    case 'bottomRight':
+      return 'topLeft';
+  }
+}
+
+function adjacentDiagonalEndpoints(
+  left: number,
+  top: number,
+  size: number,
+  corner: PatternCellCorner,
+): Array<{ x: number; y: number }> {
+  switch (corner) {
+    case 'topRight':
+    case 'bottomLeft':
+      return [
+        { x: left, y: top },
+        { x: left + size, y: top + size },
+      ];
+    case 'topLeft':
+    case 'bottomRight':
+      return [
+        { x: left + size, y: top },
+        { x: left, y: top + size },
+      ];
+  }
+}
+
+function drawThreeQuarterStitch(
+  context: CanvasRenderingContext2D,
+  left: number,
+  top: number,
+  size: number,
+  color: string,
+  shortCorner: PatternCellCorner,
+  lineWidth: number,
+): void {
+  const gap = Math.max(0.8, size * 0.18);
+  const [fullStartRaw, fullEndRaw] = adjacentDiagonalEndpoints(left, top, size, shortCorner);
+  const centerX = left + size / 2;
+  const centerY = top + size / 2;
+  const shortStart = cornerPoint(left + gap, top + gap, size - gap * 2, shortCorner);
+  const fullStart =
+    fullStartRaw.x < centerX
+      ? { x: fullStartRaw.x + gap, y: fullStartRaw.y + (fullStartRaw.y < centerY ? gap : -gap) }
+      : { x: fullStartRaw.x - gap, y: fullStartRaw.y + (fullStartRaw.y < centerY ? gap : -gap) };
+  const fullEnd =
+    fullEndRaw.x < centerX
+      ? { x: fullEndRaw.x + gap, y: fullEndRaw.y + (fullEndRaw.y < centerY ? gap : -gap) }
+      : { x: fullEndRaw.x - gap, y: fullEndRaw.y + (fullEndRaw.y < centerY ? gap : -gap) };
+
+  context.strokeStyle = color;
+  context.lineWidth = lineWidth;
+  context.lineCap = 'round';
+  context.beginPath();
+  context.moveTo(fullStart.x, fullStart.y);
+  context.lineTo(fullEnd.x, fullEnd.y);
+  context.moveTo(shortStart.x, shortStart.y);
+  context.lineTo(centerX, centerY);
+  context.stroke();
+}
+
+function drawAccentFill(
+  context: CanvasRenderingContext2D,
+  left: number,
+  top: number,
+  size: number,
+  shortCorner: PatternCellCorner,
+  color: string,
+): void {
+  const [from, to] = adjacentDiagonalEndpoints(left, top, size, shortCorner);
+  const accentCorner = oppositeCorner(shortCorner);
+  const accentPoint = cornerPoint(left, top, size, accentCorner);
+
+  context.fillStyle = color;
+  context.beginPath();
+  context.moveTo(from.x, from.y);
+  context.lineTo(to.x, to.y);
+  context.lineTo(accentPoint.x, accentPoint.y);
+  context.closePath();
+  context.fill();
+}
+
+function drawQuarterGuide(
+  context: CanvasRenderingContext2D,
+  left: number,
+  top: number,
+  size: number,
+  shortCorner: PatternCellCorner,
+): void {
+  context.strokeStyle = 'rgba(16, 35, 29, 0.08)';
+  context.lineWidth = 0.6;
+  context.lineCap = 'round';
+  context.beginPath();
+  const corner = cornerPoint(left, top, size, shortCorner);
+  context.moveTo(corner.x, corner.y);
+  context.lineTo(left + size / 2, top + size / 2);
+  context.stroke();
+}
+
 export function drawStitchPreview(
   canvas: HTMLCanvasElement,
   pattern: PatternDocument,
@@ -63,20 +208,32 @@ export function drawStitchPreview(
       const top = y * cellSize;
       const centerX = left + cellSize / 2;
       const centerY = top + cellSize / 2;
-      const margin = Math.max(1, cellSize * 0.18);
 
       context.fillStyle = 'rgba(255, 255, 255, 0.24)';
       context.fillRect(left, top, cellSize, cellSize);
 
-      context.strokeStyle = cell.color;
-      context.lineWidth = Math.max(1.5, cellSize * 0.18);
-      context.lineCap = 'round';
-      context.beginPath();
-      context.moveTo(left + margin, top + margin);
-      context.lineTo(left + cellSize - margin, top + cellSize - margin);
-      context.moveTo(left + cellSize - margin, top + margin);
-      context.lineTo(left + margin, top + cellSize - margin);
-      context.stroke();
+      if (cell.fractional?.kind === 'threeQuarter') {
+        drawAccentFill(
+          context,
+          left,
+          top,
+          cellSize,
+          cell.fractional.shortCorner,
+          `${cell.fractional.accent.color}88`,
+        );
+        drawThreeQuarterStitch(
+          context,
+          left,
+          top,
+          cellSize,
+          cell.color,
+          cell.fractional.shortCorner,
+          Math.max(1.4, cellSize * 0.18),
+        );
+        drawQuarterGuide(context, left, top, cellSize, cell.fractional.shortCorner);
+      } else {
+        drawCross(context, left, top, cellSize, cell.color, Math.max(1.5, cellSize * 0.18));
+      }
 
       context.strokeStyle = 'rgba(16, 35, 29, 0.08)';
       context.lineWidth = 0.6;

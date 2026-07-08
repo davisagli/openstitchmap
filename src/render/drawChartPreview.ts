@@ -1,4 +1,4 @@
-import type { PatternDocument } from '../core/pattern/compilePattern';
+import type { PatternCellCorner, PatternDocument } from '../core/pattern/compilePattern';
 
 function setupCanvas(canvas: HTMLCanvasElement, width: number, height: number): CanvasRenderingContext2D {
   const ratio = window.devicePixelRatio || 1;
@@ -40,6 +40,94 @@ function drawFrenchKnot(
   context.fill();
 }
 
+function drawCellSymbol(
+  context: CanvasRenderingContext2D,
+  symbol: string,
+  x: number,
+  y: number,
+  fontSize: number,
+): void {
+  context.fillStyle = '#11231c';
+  context.font = `${fontSize}px "Avenir Next", sans-serif`;
+  context.textAlign = 'center';
+  context.textBaseline = 'middle';
+  context.fillText(symbol, x, y + 0.5);
+}
+
+function cornerPoint(
+  left: number,
+  top: number,
+  size: number,
+  corner: PatternCellCorner,
+): { x: number; y: number } {
+  switch (corner) {
+    case 'topLeft':
+      return { x: left, y: top };
+    case 'topRight':
+      return { x: left + size, y: top };
+    case 'bottomLeft':
+      return { x: left, y: top + size };
+    case 'bottomRight':
+      return { x: left + size, y: top + size };
+  }
+}
+
+function triangleVertices(
+  left: number,
+  top: number,
+  size: number,
+  corner: PatternCellCorner,
+): Array<{ x: number; y: number }> {
+  switch (corner) {
+    case 'topLeft':
+      return [
+        { x: left, y: top },
+        { x: left + size, y: top },
+        { x: left, y: top + size },
+      ];
+    case 'topRight':
+      return [
+        { x: left + size, y: top },
+        { x: left, y: top },
+        { x: left + size, y: top + size },
+      ];
+    case 'bottomLeft':
+      return [
+        { x: left, y: top + size },
+        { x: left, y: top },
+        { x: left + size, y: top + size },
+      ];
+    case 'bottomRight':
+      return [
+        { x: left + size, y: top + size },
+        { x: left + size, y: top },
+        { x: left, y: top + size },
+      ];
+  }
+}
+
+function diagonalEndpoints(
+  left: number,
+  top: number,
+  size: number,
+  corner: PatternCellCorner,
+): Array<{ x: number; y: number }> {
+  switch (corner) {
+    case 'topRight':
+    case 'bottomLeft':
+      return [
+        { x: left, y: top },
+        { x: left + size, y: top + size },
+      ];
+    case 'topLeft':
+    case 'bottomRight':
+      return [
+        { x: left + size, y: top },
+        { x: left, y: top + size },
+      ];
+  }
+}
+
 export function drawChartPreview(
   canvas: HTMLCanvasElement,
   pattern: PatternDocument,
@@ -62,14 +150,44 @@ export function drawChartPreview(
       const left = x * cellSize;
       const top = y * cellSize;
 
-      context.fillStyle = cell.color;
-      context.fillRect(left, top, cellSize, cellSize);
+      if (cell.fractional?.kind === 'threeQuarter') {
+        context.fillStyle = cell.fractional.accent.color;
+        context.fillRect(left, top, cellSize, cellSize);
 
-      context.fillStyle = '#11231c';
-      context.font = `${Math.max(8, Math.floor(cellSize * 0.56))}px "Avenir Next", sans-serif`;
-      context.textAlign = 'center';
-      context.textBaseline = 'middle';
-      context.fillText(cell.symbol, left + cellSize / 2, top + cellSize / 2 + 0.5);
+        const [corner, first, second] = triangleVertices(left, top, cellSize, cell.fractional.shortCorner);
+        context.fillStyle = cell.color;
+        context.beginPath();
+        context.moveTo(corner.x, corner.y);
+        context.lineTo(first.x, first.y);
+        context.lineTo(second.x, second.y);
+        context.closePath();
+        context.fill();
+
+        const [from, to] = diagonalEndpoints(left, top, cellSize, cell.fractional.shortCorner);
+        context.strokeStyle = 'rgba(16, 35, 29, 0.22)';
+        context.lineWidth = Math.max(0.9, cellSize * 0.06);
+        context.beginPath();
+        context.moveTo(from.x, from.y);
+        context.lineTo(to.x, to.y);
+        context.stroke();
+        drawCellSymbol(
+          context,
+          cell.symbol,
+          left + cellSize / 2,
+          top + cellSize / 2,
+          Math.max(7, Math.floor(cellSize * 0.48)),
+        );
+      } else {
+        context.fillStyle = cell.color;
+        context.fillRect(left, top, cellSize, cellSize);
+        drawCellSymbol(
+          context,
+          cell.symbol,
+          left + cellSize / 2,
+          top + cellSize / 2,
+          Math.max(8, Math.floor(cellSize * 0.56)),
+        );
+      }
     }
   }
 
