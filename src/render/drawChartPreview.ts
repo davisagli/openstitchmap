@@ -16,6 +16,30 @@ function setupCanvas(canvas: HTMLCanvasElement, width: number, height: number): 
   return context;
 }
 
+function drawFrenchKnot(
+  context: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  color: string,
+  radius: number,
+): void {
+  context.fillStyle = '#fffdf7';
+  context.beginPath();
+  context.arc(x, y, radius, 0, Math.PI * 2);
+  context.fill();
+
+  context.strokeStyle = color;
+  context.lineWidth = Math.max(1, radius * 0.5);
+  context.beginPath();
+  context.arc(x, y, radius, 0, Math.PI * 2);
+  context.stroke();
+
+  context.fillStyle = color;
+  context.beginPath();
+  context.arc(x, y, Math.max(1.2, radius * 0.42), 0, Math.PI * 2);
+  context.fill();
+}
+
 export function drawChartPreview(
   canvas: HTMLCanvasElement,
   pattern: PatternDocument,
@@ -92,18 +116,7 @@ export function drawChartPreview(
   for (const marker of pattern.markers) {
     const x = marker.position.x * cellSize;
     const y = marker.position.y * cellSize;
-    const radius = Math.max(5, cellSize * 0.32);
-
-    context.fillStyle = marker.color;
-    context.beginPath();
-    context.arc(x, y, radius, 0, Math.PI * 2);
-    context.fill();
-
-    context.fillStyle = '#ffffff';
-    context.font = `700 ${Math.max(7, Math.floor(cellSize * 0.44))}px "Avenir Next", sans-serif`;
-    context.textAlign = 'center';
-    context.textBaseline = 'middle';
-    context.fillText(marker.symbol, x, y + 0.5);
+    drawFrenchKnot(context, x, y, marker.color, Math.max(4.5, cellSize * 0.26));
   }
 
   context.restore();

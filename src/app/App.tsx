@@ -8,7 +8,10 @@ import { lonLatToWorld, worldToLonLat } from '../core/tiles/mercator';
 import { areaPresets } from '../core/tiles/presets';
 import {
   compilePattern,
-  type BackstitchSmoothingLevel,
+  classifyLine,
+  classifyMarker,
+  classifyPolygon,
+  type LegendEntry,
   type PatternDocument,
 } from '../core/pattern/compilePattern';
 import {
@@ -18,7 +21,7 @@ import {
 } from '../core/pattern/curateFeatures';
 import { drawChartPreview } from '../render/drawChartPreview';
 import { drawStitchPreview } from '../render/drawStitchPreview';
-import { exportCanvasPng, exportPatternJson } from '../render/exporters';
+import { exportCanvasPng } from '../render/exporters';
 
 type ViewMode = 'chart' | 'stitched';
 
@@ -37,9 +40,6 @@ interface Settings {
   height: number;
   fabricCount: number;
   detailLevel: DetailLevel;
-  backstitchSmoothing: BackstitchSmoothingLevel;
-  includeMinorRoads: boolean;
-  includePoiLabels: boolean;
   zoomHint: number;
   pmtilesUrl: string;
 }
@@ -56,9 +56,6 @@ const defaultSettings: Settings = {
   height: 72,
   fabricCount: 14,
   detailLevel: 'medium',
-  backstitchSmoothing: 'balanced',
-  includeMinorRoads: true,
-  includePoiLabels: true,
   zoomHint: defaultAreaPreset.zoom,
   pmtilesUrl: '',
 };
@@ -148,6 +145,40 @@ function filterFeaturesToBBox(features: MapFeature[], bbox: BBox): MapFeature[] 
   return features.filter((feature) => bboxIntersects(featureBBox(feature), bbox));
 }
 
+function legendEntryKey(entry: Pick<LegendEntry, 'id' | 'mode'>): string {
+  return `${entry.mode}:${entry.id}`;
+}
+
+function isInteractiveLegendEntry(entry: LegendEntry): boolean {
+  return !(entry.mode === 'fill' && entry.id === 'ground');
+}
+
+function featureLegendKey(feature: MapFeature): string | null {
+  if (feature.type === 'polygon') {
+    const style = classifyPolygon(feature);
+    return style ? `fill:${style.id}` : null;
+  }
+
+  if (feature.type === 'line') {
+    const kind = classifyLine(feature);
+    return kind ? `line:${kind}` : null;
+  }
+
+  const kind = classifyMarker(feature);
+  return kind ? `marker:${kind}` : null;
+}
+
+function filterFeaturesByLegendSelection(features: MapFeature[], hiddenEntries: Set<string>): MapFeature[] {
+  if (!hiddenEntries.size) {
+    return features;
+  }
+
+  return features.filter((feature) => {
+    const key = featureLegendKey(feature);
+    return key ? !hiddenEntries.has(key) : true;
+  });
+}
+
 export function App() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const previewViewportRef = useRef<HTMLDivElement | null>(null);
@@ -164,6 +195,8 @@ export function App() {
   const deferredSettings = useDeferredValue(settings);
   const [sourceData, setSourceData] = useState<LoadedSourceData | null>(null);
   const [curation, setCuration] = useState<CurateFeaturesResult | null>(null);
+  const [availableLegend, setAvailableLegend] = useState<LegendEntry[]>([]);
+  const [hiddenLegendEntries, setHiddenLegendEntries] = useState<Set<string>>(new Set());
   const [pattern, setPattern] = useState<PatternDocument | null>(null);
   const [previewPattern, setPreviewPattern] = useState<PatternDocument | null>(null);
   const [sourceError, setSourceError] = useState<string | null>(null);
@@ -260,47 +293,59 @@ export function App() {
         width: deferredSettings.width,
         height: deferredSettings.height,
         detailLevel: deferredSettings.detailLevel,
-        includeMinorRoads: deferredSettings.includeMinorRoads,
+        includeMinorRoads: true,
       });
       const previewCuration = curateFeatures(previewFeatures, {
         bbox: previewViewportBBox,
         width: previewWidth,
         height: previewHeight,
         detailLevel: deferredSettings.detailLevel,
-        includeMinorRoads: deferredSettings.includeMinorRoads,
+        includeMinorRoads: true,
       });
+      const fullPattern = compilePattern(curated.features, {
+        title: `${sourceData.title} Pattern`,
+        width: deferredSettings.width,
+        height: deferredSettings.height,
+        bbox: currentViewportBBox,
+        includeMinorRoads: true,
+      });
+      const filteredCuratedFeatures = filterFeaturesByLegendSelection(
+        curated.features,
+        hiddenLegendEntries,
+      );
+      const filteredPreviewFeatures = filterFeaturesByLegendSelection(
+        previewCuration.features,
+        hiddenLegendEntries,
+      );
 
       setCuration(curated);
+      setAvailableLegend(fullPattern.legend.filter(isInteractiveLegendEntry));
       setPattern(
-        compilePattern(curated.features, {
-          title: `${sourceData.title} Pattern`,
-          width: deferredSettings.width,
-          height: deferredSettings.height,
-          bbox: currentViewportBBox,
-          includeMinorRoads: deferredSettings.includeMinorRoads,
-          includePoiLabels: deferredSettings.includePoiLabels,
-          backstitchSmoothing: deferredSettings.backstitchSmoothing,
-        }),
+        hiddenLegendEntries.size
+          ? compilePattern(filteredCuratedFeatures, {
+              title: `${sourceData.title} Pattern`,
+              width: deferredSettings.width,
+              height: deferredSettings.height,
+              bbox: currentViewportBBox,
+              includeMinorRoads: true,
+            })
+          : fullPattern,
       );
       setPreviewPattern(
-        compilePattern(previewCuration.features, {
+        compilePattern(filteredPreviewFeatures, {
           title: `${sourceData.title} Preview`,
           width: previewWidth,
           height: previewHeight,
           bbox: previewViewportBBox,
-          includeMinorRoads: deferredSettings.includeMinorRoads,
-          includePoiLabels: deferredSettings.includePoiLabels,
-          backstitchSmoothing: deferredSettings.backstitchSmoothing,
+          includeMinorRoads: true,
         }),
       );
     });
   }, [
-    deferredSettings.backstitchSmoothing,
     deferredSettings.detailLevel,
     deferredSettings.height,
-    deferredSettings.includeMinorRoads,
-    deferredSettings.includePoiLabels,
     deferredSettings.width,
+    hiddenLegendEntries,
     sourceData,
   ]);
 
@@ -496,8 +541,20 @@ export function App() {
     exportCanvasPng(canvasRef.current, `${pattern.title.toLowerCase().replace(/\s+/g, '-')}-${viewMode}.png`);
   }
 
-  const legend = pattern?.legend ?? [];
-  const title = `${sourceData?.title ?? 'OpenFreeMap'} Selection`;
+  function toggleLegendEntry(entry: LegendEntry) {
+    const key = legendEntryKey(entry);
+    setHiddenLegendEntries((current) => {
+      const next = new Set(current);
+      if (next.has(key)) {
+        next.delete(key);
+      } else {
+        next.add(key);
+      }
+      return next;
+    });
+  }
+
+  const legend = availableLegend;
   const diagnostics = sourceData?.diagnostics;
   const sourceFeatureCount = sourceData?.features.length ?? 0;
   const curationStats = curation?.stats;
@@ -505,6 +562,14 @@ export function App() {
   const droppedFeatureCount = curationStats
     ? curationStats.originalCount - curationStats.curatedCount
     : 0;
+  const diagnosticsSummary = diagnostics
+    ? `${diagnostics.fetchedTileCount}/${diagnostics.tileCount} tiles · ${sourceFeatureCount.toLocaleString()} normalized features · ${curatedFeatureCount.toLocaleString()} kept`
+    : null;
+  const orderedLegend = [
+    ...legend.filter((entry) => entry.mode === 'fill'),
+    ...legend.filter((entry) => entry.mode === 'line'),
+    ...legend.filter((entry) => entry.mode === 'marker'),
+  ];
 
   const cellSize =
     viewMode === 'chart'
@@ -543,198 +608,142 @@ export function App() {
           </p>
         </div>
 
-        <div className="control-group">
-          <div className="dimension-row">
-            <div className="control-row">
-              <label htmlFor="width">Pattern width</label>
-              <input
-                className="number-input"
-                id="width"
-                type="number"
-                min={36}
-                max={180}
-                value={settings.width}
-                onChange={(event) =>
-                  updateSettings('width', clampDimension(Number(event.target.value), settings.width))
-                }
-              />
-            </div>
-
-            <div className="control-row">
-              <label htmlFor="height">Pattern height</label>
-              <input
-                className="number-input"
-                id="height"
-                type="number"
-                min={36}
-                max={180}
-                value={settings.height}
-                onChange={(event) =>
-                  updateSettings('height', clampDimension(Number(event.target.value), settings.height))
-                }
-              />
-            </div>
-          </div>
-
-          <div className="control-row">
-            <div className="legend-title">Stitch detail</div>
-            <div className="segmented three-up" role="tablist" aria-label="Stitch detail">
-              {(['low', 'medium', 'high'] as const).map((level) => (
-                <button
-                  key={level}
-                  className={`segment ${settings.detailLevel === level ? 'active' : ''}`}
-                  type="button"
-                  onClick={() => updateSettings('detailLevel', level)}
-                >
-                  {level[0].toUpperCase()}
-                  {level.slice(1)}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          <div className="control-row">
-            <div className="legend-title">Backstitch smoothing</div>
-            <div className="segmented three-up" role="tablist" aria-label="Backstitch smoothing">
-              {([
-                ['soft', 'Soft'],
-                ['balanced', 'Balanced'],
-                ['strong', 'Strong'],
-              ] as const).map(([level, label]) => (
-                <button
-                  key={level}
-                  className={`segment ${settings.backstitchSmoothing === level ? 'active' : ''}`}
-                  type="button"
-                  onClick={() => updateSettings('backstitchSmoothing', level)}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          <div className="control-row">
-            <label htmlFor="fabric-count">Fabric count</label>
-            <div className="range-wrap">
-              <input
-                className="range-input"
-                id="fabric-count"
-                type="range"
-                min={11}
-                max={18}
-                step={1}
-                value={settings.fabricCount}
-                onChange={(event) => updateSettings('fabricCount', Number(event.target.value))}
-              />
-              <input
-                className="number-input"
-                type="number"
-                min={11}
-                max={18}
-                value={settings.fabricCount}
-                onChange={(event) => updateSettings('fabricCount', Number(event.target.value))}
-              />
-            </div>
-          </div>
-
-          <label className="check-row">
-            <input
-              type="checkbox"
-              checked={settings.includeMinorRoads}
-              onChange={(event) => updateSettings('includeMinorRoads', event.target.checked)}
-            />
-            <span>Include minor roads and paths in the backstitch overlay.</span>
-          </label>
-
-          <label className="check-row">
-            <input
-              type="checkbox"
-              checked={settings.includePoiLabels}
-              onChange={(event) => updateSettings('includePoiLabels', event.target.checked)}
-            />
-            <span>Use POI names in the exported pattern data.</span>
-          </label>
-
-          <div className="control-row">
-            <div className="legend-title">Preview mode</div>
-            <div className="segmented" role="tablist" aria-label="Preview mode">
-              <button
-                className={`segment ${viewMode === 'chart' ? 'active' : ''}`}
-                type="button"
-                onClick={() => setViewMode('chart')}
-              >
-                Chart
-              </button>
-              <button
-                className={`segment ${viewMode === 'stitched' ? 'active' : ''}`}
-                type="button"
-                onClick={() => setViewMode('stitched')}
-              >
-                Stitched
-              </button>
-            </div>
-          </div>
-        </div>
-
-        <div className="actions">
-          <button className="button primary" type="button" onClick={handlePngExport}>
-            Export PNG
-          </button>
-          <button
-            className="button"
-            type="button"
-            onClick={() => {
-              if (pattern) {
-                exportPatternJson(pattern);
-              }
-            }}
-          >
-            Export JSON
-          </button>
-        </div>
-
-        <div className="sidebar-footer">
-          <div>
-            <div className="stats-title">Stitched size</div>
-            <div className="stats-grid">
-              <div className="stat-tile">
-                <div className="stat-value">{inches(settings.width, settings.fabricCount)} in</div>
-                <div className="stat-label">Width on {settings.fabricCount}-count fabric</div>
+        <section className="sidebar-section">
+          <div className="control-group">
+            <div className="dimension-row">
+              <div className="control-row">
+                <label htmlFor="width">Pattern width</label>
+                <input
+                  className="number-input"
+                  id="width"
+                  type="number"
+                  min={36}
+                  max={180}
+                  value={settings.width}
+                  onChange={(event) =>
+                    updateSettings('width', clampDimension(Number(event.target.value), settings.width))
+                  }
+                />
               </div>
-              <div className="stat-tile">
-                <div className="stat-value">{inches(settings.height, settings.fabricCount)} in</div>
-                <div className="stat-label">Height on {settings.fabricCount}-count fabric</div>
+
+              <div className="control-row">
+                <label htmlFor="height">Pattern height</label>
+                <input
+                  className="number-input"
+                  id="height"
+                  type="number"
+                  min={36}
+                  max={180}
+                  value={settings.height}
+                  onChange={(event) =>
+                    updateSettings('height', clampDimension(Number(event.target.value), settings.height))
+                  }
+                />
+              </div>
+            </div>
+
+            <div>
+              <div className="stats-title">Stitched size</div>
+              <div className="stats-grid">
+                <div className="stat-tile">
+                  <div className="stat-value">{inches(settings.width, settings.fabricCount)} in</div>
+                  <div className="stat-label">Width on {settings.fabricCount}-count fabric</div>
+                </div>
+                <div className="stat-tile">
+                  <div className="stat-value">{inches(settings.height, settings.fabricCount)} in</div>
+                  <div className="stat-label">Height on {settings.fabricCount}-count fabric</div>
+                </div>
+              </div>
+            </div>
+
+            <div className="control-row">
+              <label htmlFor="fabric-count">Fabric count</label>
+              <div className="range-wrap">
+                <input
+                  className="range-input"
+                  id="fabric-count"
+                  type="range"
+                  min={11}
+                  max={18}
+                  step={1}
+                  value={settings.fabricCount}
+                  onChange={(event) => updateSettings('fabricCount', Number(event.target.value))}
+                />
+                <input
+                  className="number-input"
+                  type="number"
+                  min={11}
+                  max={18}
+                  value={settings.fabricCount}
+                  onChange={(event) => updateSettings('fabricCount', Number(event.target.value))}
+                />
               </div>
             </div>
           </div>
+        </section>
 
-          <div>
-            <div className="stats-title">Current filter pass</div>
-            <p>
+        <section className="sidebar-section">
+          <div className="control-group">
+            <div className="control-row">
+              <div className="legend-title">Stitch detail</div>
+              <div className="segmented three-up" role="tablist" aria-label="Stitch detail">
+                {(['low', 'medium', 'high'] as const).map((level) => (
+                  <button
+                    key={level}
+                    className={`segment ${settings.detailLevel === level ? 'active' : ''}`}
+                    type="button"
+                    onClick={() => updateSettings('detailLevel', level)}
+                  >
+                    {level[0].toUpperCase()}
+                    {level.slice(1)}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="control-row">
+              <div className="legend-title">Preview mode</div>
+              <div className="segmented" role="tablist" aria-label="Preview mode">
+                <button
+                  className={`segment ${viewMode === 'chart' ? 'active' : ''}`}
+                  type="button"
+                  onClick={() => setViewMode('chart')}
+                >
+                  Chart
+                </button>
+                <button
+                  className={`segment ${viewMode === 'stitched' ? 'active' : ''}`}
+                  type="button"
+                  onClick={() => setViewMode('stitched')}
+                >
+                  Stitched
+                </button>
+              </div>
+            </div>
+
+            <p className="section-note">
               {settings.detailLevel[0].toUpperCase()}
               {settings.detailLevel.slice(1)} detail keeps the preview legible by
               trimming tiny fills, simplifying linework, and spacing out POI markers.
-              {' '}Backstitch smoothing is set to {settings.backstitchSmoothing}.
             </p>
           </div>
-        </div>
+        </section>
+
+        <section className="sidebar-section">
+          <div className="actions">
+            <button className="button primary" type="button" onClick={handlePngExport}>
+              Export PNG
+            </button>
+          </div>
+        </section>
       </aside>
 
       <main className="workspace">
         <div className="workspace-header">
-          <div>
-            <h2>{title}</h2>
-            <p>
-              Drag the preview to pan and use the mouse wheel to zoom. We are
-              rendering directly from OpenFreeMap so choosing the area to stitch
-              feels more like navigating a map than picking from presets.
-            </p>
-          </div>
-          <div className="hint">
-            {isPending || isRefreshingPreview
-              ? 'Refreshing pattern preview...'
-              : `Zoom ${settings.zoomHint} · ${settings.width} × ${settings.height} stitches, ${legend.length} legend entries`}
-          </div>
+          <p>
+            Scroll to zoom and drag the preview to pan. Use the grouped legend below to
+            hide individual areas, ways, or POIs from the stitched map.
+          </p>
         </div>
 
         <section
@@ -754,9 +763,6 @@ export function App() {
                 ref={previewViewportRef}
                 style={previewViewportStyle}
               >
-                <div className="preview-overlay">
-                  {isRefreshingPreview ? 'Updating preview...' : 'Drag to pan. Scroll to zoom.'}
-                </div>
                 <canvas
                   className={`preview-canvas ${
                     isDraggingPreview ? 'dragging' : 'draggable'
@@ -775,9 +781,44 @@ export function App() {
           </div>
         </section>
 
-        {diagnostics ? (
-          <section>
-            <div className="legend-title">Source diagnostics</div>
+        <section className="legend-section">
+          <div className="legend-title">Legend</div>
+          <div className="legend-band">
+            {orderedLegend.map((entry) => (
+              <button
+                className={`legend-item ${hiddenLegendEntries.has(legendEntryKey(entry)) ? 'inactive' : 'active'}`}
+                key={legendEntryKey(entry)}
+                type="button"
+                aria-pressed={!hiddenLegendEntries.has(legendEntryKey(entry))}
+                onClick={() => toggleLegendEntry(entry)}
+              >
+                <div
+                  className={`legend-swatch ${entry.mode}`}
+                  style={entry.mode === 'fill' ? { backgroundColor: entry.color } : { color: entry.color }}
+                  aria-hidden="true"
+                >
+                  <span className={`legend-symbol legend-symbol-${entry.mode}`} />
+                </div>
+                <div className="legend-meta">
+                  <strong>{entry.label}</strong>
+                  <span>{entry.floss}</span>
+                </div>
+                <div className="legend-usage">
+                  <strong>{entry.usage}</strong>
+                  {hiddenLegendEntries.has(legendEntryKey(entry)) ? <span>Hidden</span> : null}
+                </div>
+              </button>
+            ))}
+          </div>
+        </section>
+
+        {diagnostics && diagnosticsSummary ? (
+          <details className="diagnostics-panel">
+            <summary className="diagnostics-summary">
+              <span className="legend-title">Source diagnostics</span>
+              <span>{diagnosticsSummary}</span>
+            </summary>
+
             <div className="stats-grid diagnostics-grid">
               <div className="stat-tile">
                 <div className="stat-value">{sourceFeatureCount}</div>
@@ -838,33 +879,8 @@ export function App() {
                 </div>
               ))}
             </div>
-          </section>
+          </details>
         ) : null}
-
-        <section>
-          <div className="legend-title">Legend</div>
-          <div className="legend-band">
-            {legend.map((entry) => (
-              <div className="legend-item" key={`${entry.mode}:${entry.id}`}>
-                <div
-                  className="legend-swatch"
-                  style={{ backgroundColor: entry.color }}
-                  aria-hidden="true"
-                >
-                  {entry.symbol}
-                </div>
-                <div className="legend-meta">
-                  <strong>{entry.label}</strong>
-                  <span>{entry.floss}</span>
-                </div>
-                <div className="legend-usage">
-                  <strong>{entry.usage}</strong>
-                  <span>{entry.mode}</span>
-                </div>
-              </div>
-            ))}
-          </div>
-        </section>
       </main>
     </div>
   );

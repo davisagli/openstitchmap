@@ -63,16 +63,12 @@ export interface PatternDocument {
   legend: LegendEntry[];
 }
 
-export type BackstitchSmoothingLevel = 'soft' | 'balanced' | 'strong';
-
 export interface CompilePatternOptions {
   title: string;
   width: number;
   height: number;
   bbox: BBox;
   includeMinorRoads: boolean;
-  includePoiLabels: boolean;
-  backstitchSmoothing: BackstitchSmoothingLevel;
 }
 
 interface StyledPolygon {
@@ -144,31 +140,21 @@ function dedupeGridPoints(points: GridPoint[]): GridPoint[] {
   return deduped;
 }
 
-function lineSimplifyTolerance(
-  kind: LineStyleId,
-  level: BackstitchSmoothingLevel,
-): number {
-  const multiplier =
-    level === 'soft'
-      ? 0.72
-      : level === 'strong'
-        ? 1.35
-        : 1;
-
+function lineSimplifyTolerance(kind: LineStyleId): number {
   switch (kind) {
     case 'primaryRoad':
-      return 0.85 * multiplier;
+      return 0.85;
     case 'rail':
-      return 0.75 * multiplier;
+      return 0.75;
     case 'secondaryRoad':
-      return 0.65 * multiplier;
+      return 0.65;
     case 'stream':
     case 'boundary':
-      return 0.45 * multiplier;
+      return 0.45;
     case 'path':
-      return 0.35 * multiplier;
+      return 0.35;
     default:
-      return 0.5 * multiplier;
+      return 0.5;
   }
 }
 
@@ -178,7 +164,6 @@ function snapAndSimplifyLine(
   width: number,
   height: number,
   kind: LineStyleId,
-  level: BackstitchSmoothingLevel,
 ): GridPoint[] {
   const snapped = dedupeGridPoints(
     coordinates.map((point) => {
@@ -194,7 +179,7 @@ function snapAndSimplifyLine(
     return snapped;
   }
 
-  const indexes = Array.from(new Set(douglasPeuckerIndexes(snapped, lineSimplifyTolerance(kind, level)))).sort(
+  const indexes = Array.from(new Set(douglasPeuckerIndexes(snapped, lineSimplifyTolerance(kind)))).sort(
     (left, right) => left - right,
   );
   return indexes.map((index) => snapped[index]);
@@ -399,7 +384,7 @@ function buildLegend(
       label: style.label,
       symbol: style.symbol,
       color: style.color,
-      floss: 'Marker',
+      floss: style.floss,
       usage,
       mode: 'marker',
     });
@@ -462,7 +447,6 @@ export function compilePattern(
         options.width,
         options.height,
         kind,
-        options.backstitchSmoothing,
       );
 
       for (let index = 1; index < simplifiedPath.length; index += 1) {
@@ -500,7 +484,7 @@ export function compilePattern(
         kind,
         color: style.color,
         symbol: style.symbol,
-        label: options.includePoiLabels ? feature.name ?? style.label : style.label,
+        label: style.label,
         position: {
           x: clamp(Math.floor(position.x), 0, options.width - 1) + 0.5,
           y: clamp(Math.floor(position.y), 0, options.height - 1) + 0.5,

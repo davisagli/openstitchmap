@@ -16,6 +16,30 @@ function setupCanvas(canvas: HTMLCanvasElement, width: number, height: number): 
   return context;
 }
 
+function drawFrenchKnot(
+  context: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  color: string,
+  radius: number,
+): void {
+  context.fillStyle = color;
+  context.beginPath();
+  context.arc(x, y, radius, 0, Math.PI * 2);
+  context.fill();
+
+  context.strokeStyle = 'rgba(255, 247, 239, 0.75)';
+  context.lineWidth = Math.max(1, radius * 0.33);
+  context.beginPath();
+  context.arc(x - radius * 0.18, y - radius * 0.18, radius * 0.5, 0, Math.PI * 2);
+  context.stroke();
+
+  context.fillStyle = 'rgba(255, 255, 255, 0.45)';
+  context.beginPath();
+  context.arc(x - radius * 0.2, y - radius * 0.25, Math.max(1, radius * 0.18), 0, Math.PI * 2);
+  context.fill();
+}
+
 export function drawStitchPreview(
   canvas: HTMLCanvasElement,
   pattern: PatternDocument,
@@ -75,18 +99,7 @@ export function drawStitchPreview(
   for (const marker of pattern.markers) {
     const x = marker.position.x * cellSize;
     const y = marker.position.y * cellSize;
-    const radius = Math.max(6, cellSize * 0.34);
-
-    context.fillStyle = marker.color;
-    context.beginPath();
-    context.arc(x, y, radius, 0, Math.PI * 2);
-    context.fill();
-
-    context.fillStyle = '#fff7ef';
-    context.font = `700 ${Math.max(8, Math.floor(cellSize * 0.46))}px "Avenir Next", sans-serif`;
-    context.textAlign = 'center';
-    context.textBaseline = 'middle';
-    context.fillText(marker.symbol, x, y + 0.5);
+    drawFrenchKnot(context, x, y, marker.color, Math.max(4.8, cellSize * 0.24));
   }
 
   context.restore();

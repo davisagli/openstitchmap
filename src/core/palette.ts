@@ -42,6 +42,7 @@ export interface MarkerStyle {
   id: MarkerStyleId;
   label: string;
   color: string;
+  floss: string;
   symbol: string;
 }
 
@@ -146,30 +147,35 @@ export const markerStyles: Record<MarkerStyleId, MarkerStyle> = {
     id: 'cafe',
     label: 'Cafe',
     color: '#b6523d',
-    symbol: 'C',
+    floss: 'DMC 920',
+    symbol: '•',
   },
   station: {
     id: 'station',
     label: 'Station',
     color: '#2f5f9a',
-    symbol: 'T',
+    floss: 'DMC 336',
+    symbol: '•',
   },
   viewpoint: {
     id: 'viewpoint',
     label: 'Viewpoint',
     color: '#6f7c2d',
-    symbol: 'V',
+    floss: 'DMC 730',
+    symbol: '•',
   },
   museum: {
     id: 'museum',
     label: 'Museum',
     color: '#835e8c',
-    symbol: 'M',
+    floss: 'DMC 208',
+    symbol: '•',
   },
   hospital: {
     id: 'hospital',
     label: 'Hospital',
     color: '#a8374e',
-    symbol: 'H',
+    floss: 'DMC 814',
+    symbol: '•',
   },
 };
