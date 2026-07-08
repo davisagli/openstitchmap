@@ -3,43 +3,63 @@
 ## Project state
 
 - Greenfield Vite + React + TypeScript app for turning OSM-style vector data into a cross stitch chart.
-- Data sources currently supported:
-  - Hosted vector tiles via OpenFreeMap TileJSON
+- Current UX is OpenFreeMap-only, centered on the Seattle waterfront by default.
+- Code paths still exist for:
+  - hosted vector tiles via OpenFreeMap TileJSON
   - PMTiles URL
   - Seattle-inspired local demo source
-- Main Seattle presets live in `src/core/tiles/presets.ts`.
+  but PMTiles/demo selection is intentionally hidden in the UI for now.
+- Main Seattle defaults still originate from `src/core/tiles/presets.ts`.
 - The app builds successfully with `npm run build`.
 
 ## Current product behavior
 
 - Pattern fills are compiled from polygon features.
 - Roads/waterways/boundaries/rail render as backstitch.
-- POIs render as markers.
+- POIs render as French-knot-style markers.
 - There is a chart preview and a stitched preview.
-- The sidebar currently exposes:
-  - dataset / preset / PMTiles URL
-  - tile zoom / tile span
+- The preview now behaves like a slippy map:
+  - drag to pan
+  - mouse-wheel zoom
+  - zoom anchors under the cursor
+  - preview uses an overscanned canvas clipped by a viewport
+  - transient CSS translate/scale is used during rerenders so pan/zoom does not snap back immediately
+- The sidebar currently exposes only:
   - pattern width / height
-  - stitch detail (`low` / `medium` / `high`)
-  - backstitch smoothing (`soft` / `balanced` / `strong`)
+  - stitched size
   - fabric count
-  - include minor roads
-  - include POI labels
+  - stitch detail (`low` / `medium` / `high`)
+  - preview mode (`chart` / `stitched`)
+  - export PNG
+- The legend is now the primary feature-filter UI:
+  - single container, ordered as fills first, then ways, then POIs
+  - each legend card is a toggle button
+  - toggling a legend item recompiles the pattern without that fill/line/marker class
+- Source diagnostics live at the bottom in a collapsed `<details>` section with a short summary line.
 
 ## Important files
 
 - `src/app/App.tsx`
   - Main UI and data-loading flow.
+  - Implements slippy-map pan/zoom behavior.
   - Runs `curateFeatures(...)` before `compilePattern(...)`.
+  - Applies legend-toggle filtering before final compilation.
 - `src/core/pattern/curateFeatures.ts`
   - Main stitch-aware filtering / simplification pass.
   - Contains polygon filtering, marker budgeting, line thinning, snapped road graph logic, graph-role heuristics, and primary-corridor collapse.
 - `src/core/pattern/compilePattern.ts`
   - Compiles curated features into pattern cells / backstitch / markers.
   - Also contains backstitch path snapping + simplification.
+  - Backstitch smoothing is no longer user-configurable; the previous balanced behavior is now the fixed behavior.
 - `src/core/tiles/vectorTileDecoder.ts`
   - Shared vector tile normalization.
   - Important for layer/tag normalization, especially transportation classes.
+- `src/render/drawChartPreview.ts`
+  - Draws chart preview cells, backstitches, and French-knot-style marker rendering.
+- `src/render/drawStitchPreview.ts`
+  - Draws stitched preview cells, backstitches, and French-knot-style marker rendering.
+- `src/core/palette.ts`
+  - Fill / line / marker style definitions, including DMC floss codes used in the legend.
 
 ## Current road-graph approach
 
@@ -61,6 +81,19 @@
 - Sidewalk-like paths are more aggressively suppressed when they shadow stronger roads.
 - Some missing-link behavior improved after the snapped graph / connector preservation pass.
 - Backstitch diagonals look cleaner after the compile-time line simplification pass.
+- The UI is much quieter than earlier versions:
+  - no dataset/source chooser in the active UX
+  - no tile zoom/tile span controls
+  - no backstitch smoothing selector
+  - no POI-label toggle
+  - no JSON export
+  - no explicit sidebar section headings
+  - no explicit legend subgroup headings
+- The legend now reads closer to the map:
+  - fill swatches resemble stitched fill marks
+  - way swatches resemble angled backstitch segments
+  - POI swatches resemble French knots
+  - marker legend entries show DMC floss codes instead of the text `French knot`
 
 ## What still looks rough
 
@@ -68,10 +101,12 @@
 - Some ramps / joins are still a little arbitrary: better than before, but not yet confidently “correct”.
 - Primary corridor collapse is still based on similarity + graph role heuristics, not a true corridor-spine extraction.
 - There is no dedicated diagnostics UI yet for graph role counts or why a specific road survived/dropped.
+- The workspace intro copy still says “Use the grouped legend below…” even though the explicit subgroup headings were removed. That copy is functionally fine but could be tightened.
+- The slippy map still works on a stitch-grid abstraction, not true continuous cartographic rendering, so motion can feel a little approximate when rerenders are fast/slow.
 
 ## Most promising next steps
 
-1. Add explicit road-role diagnostics in the UI:
+1. Continue road-role diagnostics in the UI:
    - counts for `corridor`, `connector`, `duplicate`, `local`
    - maybe a short textual explanation of the current graph pass
 2. Improve graph-role scoring around links/ramps:
@@ -82,6 +117,10 @@
 4. Make primary corridor selection more corridor-aware at junctions:
    - choose a corridor spine through major nodes, not just pairwise similarity
 5. Consider making road-graph heuristics inspect `class`, `subclass`, or `*_link` values more directly in the importance score.
+6. If UI polish continues:
+   - consider slightly tightening the workspace intro text
+   - consider whether diagnostics summary belongs inline with legend/footer copy instead of as its own row
+   - consider a future export surface beyond PNG once the pattern format stabilizes
 
 ## Useful implementation notes
 
@@ -97,14 +136,27 @@
   - weird missing joins
   - 90-degree backstitch artifacts where diagonals should appear
 - Seattle hosted preset has been the main visual validation target.
+- Legend toggles are based on style classification:
+  - polygons -> `classifyPolygon(...)`
+  - lines -> `classifyLine(...)`
+  - points -> `classifyMarker(...)`
+- The app currently always compiles with `includeMinorRoads: true` and relies on legend toggles for hiding classes instead of a dedicated “include minor roads” control.
 
 ## Last validated state
 
 - In-browser target: `http://127.0.0.1:4173/`
-- Last manually checked preset:
-  - dataset: hosted vector tiles
-  - area preset: Seattle Waterfront
+- Last manually checked state:
+  - OpenFreeMap Seattle waterfront default
   - stitch detail: medium
-  - backstitch smoothing: balanced (the browser was previously toggled to strong during one check, but latest validation was back on balanced)
+  - preview mode: chart
+  - legend order: fills, then ways, then POIs
+  - legend cards are compact and show DMC floss codes
+  - extra vertical space sits below the legend rather than inflating the preview frame
 - Build status:
   - `npm run build` passed
+
+## Recent commits
+
+- `cbfb35d` - `Refine stitch preview UI`
+- `896b8b4` - `Add slippy map preview interactions`
+- `a8b3893` - `Initial OpenStitchMap prototype`
