@@ -7,7 +7,7 @@ OpenStitchMap is an experimental tool for converting OpenStreetMap-style vector 
 This scaffold includes:
 
 - A reusable pattern compiler that turns polygon, line, and point features into embroidery primitives.
-- Two preview modes: chart view and stitched view.
+- Two preview modes: a printable chart and a realistic stitched product preview.
 - A live PMTiles-backed vector tile loader with on-screen layer diagnostics.
 - Local demo data so the app still works without live tile access.
 - JSON and PNG export actions.

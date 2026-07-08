@@ -354,10 +354,7 @@ export function App() {
       return;
     }
 
-    const cellSize =
-      viewMode === 'chart'
-        ? Math.max(7, Math.min(14, Math.floor(860 / pattern.width)))
-        : Math.max(8, Math.min(18, Math.floor(920 / pattern.width)));
+    const cellSize = Math.max(7, Math.min(14, Math.floor(860 / pattern.width)));
 
     if (viewMode === 'chart') {
       drawChartPreview(canvasRef.current, previewPattern, cellSize);
@@ -571,10 +568,7 @@ export function App() {
     ...legend.filter((entry) => entry.mode === 'marker'),
   ];
 
-  const cellSize =
-    viewMode === 'chart'
-      ? Math.max(7, Math.min(14, Math.floor(860 / Math.max(1, settings.width))))
-      : Math.max(8, Math.min(18, Math.floor(920 / Math.max(1, settings.width))));
+  const cellSize = Math.max(7, Math.min(14, Math.floor(860 / Math.max(1, settings.width))));
   const previewViewportStyle =
     pattern && previewPattern
       ? {
