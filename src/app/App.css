@@ -1,0 +1,347 @@
+.app-shell {
+  display: grid;
+  grid-template-columns: minmax(18rem, 23rem) minmax(0, 1fr);
+  min-height: 100vh;
+}
+
+.sidebar {
+  padding: 2rem 1.4rem 1.6rem;
+  background: rgba(251, 247, 238, 0.78);
+  border-right: 1px solid rgba(16, 35, 29, 0.12);
+  backdrop-filter: blur(18px);
+}
+
+.brand {
+  margin-bottom: 1.75rem;
+}
+
+.eyebrow {
+  margin: 0 0 0.5rem;
+  font-size: 0.82rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #5b6c64;
+}
+
+.brand h1 {
+  margin: 0;
+  font-family: "Iowan Old Style", Georgia, serif;
+  font-size: clamp(2rem, 3vw, 2.85rem);
+  line-height: 0.95;
+}
+
+.brand p {
+  margin: 0.7rem 0 0;
+  max-width: 28ch;
+  color: #31453d;
+}
+
+.control-group {
+  display: grid;
+  gap: 1rem;
+  margin-bottom: 1.5rem;
+}
+
+.control-row {
+  display: grid;
+  gap: 0.4rem;
+}
+
+.control-row label,
+.legend-title,
+.stats-title {
+  font-size: 0.8rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #42554d;
+}
+
+.dimension-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.8rem;
+}
+
+.input,
+.select,
+.number-input {
+  width: 100%;
+  border: 1px solid rgba(16, 35, 29, 0.16);
+  border-radius: 8px;
+  background: rgba(255, 252, 246, 0.94);
+  color: #10231d;
+}
+
+.input,
+.select {
+  padding: 0.72rem 0.8rem;
+}
+
+.number-input {
+  padding: 0.65rem 0.75rem;
+}
+
+.range-wrap {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.75rem;
+  align-items: center;
+}
+
+.range-input {
+  width: 100%;
+  accent-color: #1e7a6d;
+}
+
+.check-row {
+  display: flex;
+  gap: 0.7rem;
+  align-items: flex-start;
+  color: #243730;
+}
+
+.check-row input {
+  margin-top: 0.2rem;
+  accent-color: #1e7a6d;
+}
+
+.actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.7rem;
+  margin-top: 1.35rem;
+}
+
+.button,
+.segment {
+  border: 1px solid rgba(16, 35, 29, 0.18);
+  border-radius: 8px;
+  background: rgba(255, 251, 244, 0.88);
+  color: #10231d;
+  padding: 0.78rem 0.9rem;
+  transition: transform 140ms ease, background-color 140ms ease, border-color 140ms ease;
+}
+
+.button:hover,
+.segment:hover {
+  transform: translateY(-1px);
+  background: #fffdf9;
+  border-color: rgba(16, 35, 29, 0.28);
+}
+
+.button.primary {
+  background: #1f675d;
+  color: #f8f1e4;
+  border-color: #1f675d;
+}
+
+.segmented {
+  display: inline-grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  padding: 0.18rem;
+  gap: 0.18rem;
+  border-radius: 10px;
+  background: rgba(16, 35, 29, 0.07);
+}
+
+.segmented.three-up {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.segment.active {
+  background: #fffaf0;
+  border-color: rgba(16, 35, 29, 0.22);
+}
+
+.sidebar-footer {
+  margin-top: 1.7rem;
+  display: grid;
+  gap: 1.2rem;
+}
+
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.7rem;
+}
+
+.diagnostics-grid {
+  margin-bottom: 0.85rem;
+}
+
+.stat-tile {
+  padding: 0.9rem 0.95rem;
+  border-radius: 8px;
+  background: rgba(255, 252, 246, 0.84);
+  border: 1px solid rgba(16, 35, 29, 0.12);
+}
+
+.stat-value {
+  font-size: 1.15rem;
+  font-weight: 700;
+}
+
+.stat-label {
+  color: #50625a;
+  font-size: 0.9rem;
+}
+
+.workspace {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  min-height: 100vh;
+  padding: 1.5rem 1.6rem;
+  gap: 1rem;
+}
+
+.workspace-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  align-items: end;
+}
+
+.workspace-header h2 {
+  margin: 0;
+  font-family: "Iowan Old Style", Georgia, serif;
+  font-size: clamp(1.7rem, 2vw, 2.4rem);
+}
+
+.workspace-header p {
+  margin: 0.35rem 0 0;
+  color: #42554d;
+}
+
+.hint {
+  color: #50625a;
+  font-size: 0.92rem;
+  text-align: right;
+  max-width: 28ch;
+}
+
+.preview-frame {
+  min-height: 0;
+  border-radius: 8px;
+  border: 1px solid rgba(16, 35, 29, 0.12);
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.55), rgba(255, 255, 255, 0.15)),
+    repeating-linear-gradient(
+      45deg,
+      rgba(31, 103, 93, 0.04) 0,
+      rgba(31, 103, 93, 0.04) 12px,
+      rgba(244, 234, 216, 0.04) 12px,
+      rgba(244, 234, 216, 0.04) 24px
+    );
+  overflow: auto;
+  padding: 1rem;
+}
+
+.preview-center {
+  min-height: 100%;
+  display: grid;
+  place-items: center;
+}
+
+.preview-canvas {
+  display: block;
+  box-shadow: 0 22px 50px rgba(16, 35, 29, 0.12);
+  border-radius: 8px;
+}
+
+.legend-band {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  gap: 0.8rem;
+}
+
+.legend-item {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 0.75rem;
+  align-items: center;
+  padding: 0.8rem 0.95rem;
+  border-radius: 8px;
+  background: rgba(255, 252, 246, 0.84);
+  border: 1px solid rgba(16, 35, 29, 0.12);
+}
+
+.legend-swatch {
+  width: 2.1rem;
+  height: 2.1rem;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  color: #fffdf7;
+  font-weight: 700;
+  font-size: 0.92rem;
+}
+
+.legend-meta strong,
+.legend-usage strong {
+  display: block;
+}
+
+.legend-meta span,
+.legend-usage span {
+  color: #54655d;
+  font-size: 0.88rem;
+}
+
+.empty-state {
+  padding: 2rem;
+  color: #42554d;
+}
+
+.empty-state strong {
+  display: block;
+  margin-bottom: 0.35rem;
+}
+
+.layer-band {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+  gap: 0.8rem;
+}
+
+.layer-item {
+  display: grid;
+  gap: 0.22rem;
+  padding: 0.85rem 0.95rem;
+  border-radius: 8px;
+  background: rgba(255, 252, 246, 0.84);
+  border: 1px solid rgba(16, 35, 29, 0.12);
+}
+
+.layer-item strong {
+  font-size: 0.98rem;
+}
+
+.layer-item span {
+  color: #54655d;
+  font-size: 0.88rem;
+}
+
+@media (max-width: 980px) {
+  .app-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .sidebar {
+    border-right: 0;
+    border-bottom: 1px solid rgba(16, 35, 29, 0.12);
+  }
+
+  .workspace {
+    min-height: auto;
+  }
+
+  .workspace-header {
+    flex-direction: column;
+    align-items: start;
+  }
+
+  .hint {
+    text-align: left;
+  }
+}
