@@ -24,6 +24,7 @@ import { drawStitchPreview } from '../render/drawStitchPreview';
 import { exportCanvasPng } from '../render/exporters';
 
 type ViewMode = 'chart' | 'stitched';
+type FabricCount = 14 | 16 | 18;
 
 interface PreviewMotion {
   scale: number;
@@ -38,7 +39,7 @@ interface Settings {
   };
   width: number;
   height: number;
-  fabricCount: number;
+  fabricCount: FabricCount;
   detailLevel: DetailLevel;
   zoomHint: number;
   pmtilesUrl: string;
@@ -49,6 +50,7 @@ const defaultAreaPreset = areaPresets[0];
 const SLIPPY_VIEW_HEIGHT_TILES = 1;
 const PREVIEW_OVERSCAN_FACTOR = 1.45;
 const PREVIEW_PADDING = 24;
+const FABRIC_COUNTS: FabricCount[] = [14, 16, 18];
 
 const defaultSettings: Settings = {
   center: defaultAreaPreset.center,
@@ -650,29 +652,23 @@ export function App() {
               </div>
             </div>
 
-            <div className="control-row">
-              <label htmlFor="fabric-count">Fabric count</label>
-              <div className="range-wrap">
-                <input
-                  className="range-input"
-                  id="fabric-count"
-                  type="range"
-                  min={11}
-                  max={18}
-                  step={1}
-                  value={settings.fabricCount}
-                  onChange={(event) => updateSettings('fabricCount', Number(event.target.value))}
-                />
-                <input
-                  className="number-input"
-                  type="number"
-                  min={11}
-                  max={18}
-                  value={settings.fabricCount}
-                  onChange={(event) => updateSettings('fabricCount', Number(event.target.value))}
-                />
+            <fieldset className="control-row radio-fieldset">
+              <legend>Fabric count</legend>
+              <div className="radio-group">
+                {FABRIC_COUNTS.map((count) => (
+                  <label className="radio-option" key={count}>
+                    <input
+                      type="radio"
+                      name="fabric-count"
+                      value={count}
+                      checked={settings.fabricCount === count}
+                      onChange={() => updateSettings('fabricCount', count)}
+                    />
+                    <span>{count} count</span>
+                  </label>
+                ))}
               </div>
-            </div>
+            </fieldset>
           </div>
         </section>
 
