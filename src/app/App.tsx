@@ -1,6 +1,7 @@
 import { useDeferredValue, useEffect, useRef, useState, useTransition } from 'react';
 import type {
   FormEvent as ReactFormEvent,
+  MouseEvent as ReactMouseEvent,
   PointerEvent as ReactPointerEvent,
   WheelEvent as ReactWheelEvent,
 } from 'react';
@@ -807,19 +808,26 @@ export function App() {
   }
 
   function handlePreviewWheel(event: ReactWheelEvent<HTMLElement>) {
+    const viewport = previewViewportRef.current;
+    if (!viewport) {
+      return;
+    }
+
     event.preventDefault();
 
+    const rect = viewport.getBoundingClientRect();
+    applyPreviewZoom(event.clientX - rect.left, event.clientY - rect.top, event.deltaY < 0 ? 1 : -1);
+  }
+
+  function applyPreviewZoom(anchorX: number, anchorY: number, zoomDelta: number) {
     const viewport = previewViewportRef.current;
     if (!viewport) {
       return;
     }
 
     const rect = viewport.getBoundingClientRect();
-    const anchorX = event.clientX - rect.left;
-    const anchorY = event.clientY - rect.top;
     const normalizedX = anchorX / Math.max(1, rect.width);
     const normalizedY = anchorY / Math.max(1, rect.height);
-    const zoomDelta = event.deltaY < 0 ? 1 : -1;
     const nextZoom = clampZoom(settings.zoomHint + zoomDelta);
     if (nextZoom === settings.zoomHint) {
       return;
@@ -857,18 +865,31 @@ export function App() {
     }));
 
     const zoomFactor = 2 ** zoomDelta;
-    const currentMotion = previewMotion ?? {
-      scale: 1,
-      translateX: 0,
-      translateY: 0,
-    };
-    setPreviewMotion({
-      scale: currentMotion.scale * zoomFactor,
-      translateX:
-        (1 - zoomFactor) * (anchorX - previewBaseOffsetX) + zoomFactor * currentMotion.translateX,
-      translateY:
-        (1 - zoomFactor) * (anchorY - previewBaseOffsetY) + zoomFactor * currentMotion.translateY,
+    setPreviewMotion((currentPreviewMotion) => {
+      const currentMotion = currentPreviewMotion ?? {
+        scale: 1,
+        translateX: 0,
+        translateY: 0,
+      };
+
+      return {
+        scale: currentMotion.scale * zoomFactor,
+        translateX:
+          (1 - zoomFactor) * (anchorX - previewBaseOffsetX) + zoomFactor * currentMotion.translateX,
+        translateY:
+          (1 - zoomFactor) * (anchorY - previewBaseOffsetY) + zoomFactor * currentMotion.translateY,
+      };
     });
+  }
+
+  function handleCanvasDoubleClick(event: ReactMouseEvent<HTMLCanvasElement>) {
+    const viewport = previewViewportRef.current;
+    if (!viewport) {
+      return;
+    }
+
+    const rect = viewport.getBoundingClientRect();
+    applyPreviewZoom(event.clientX - rect.left, event.clientY - rect.top, 1);
   }
 
   function handlePngExport() {
@@ -1049,12 +1070,6 @@ export function App() {
                 </button>
               </div>
             </div>
-
-            <p className="section-note">
-              {settings.detailLevel[0].toUpperCase()}
-              {settings.detailLevel.slice(1)} detail keeps the preview legible by
-              trimming tiny fills, simplifying linework, and spacing out POI markers.
-            </p>
           </div>
         </section>
 
@@ -1064,14 +1079,27 @@ export function App() {
               Export PNG
             </button>
           </div>
+
+          <p className="sidebar-attribution">
+            <a href="https://openfreemap.org" target="_blank" rel="noreferrer">
+              OpenFreeMap
+            </a>{' '}
+            <a href="https://www.openmaptiles.org/" target="_blank" rel="noreferrer">
+              &copy; OpenMapTiles
+            </a>{' '}
+            Data from{' '}
+            <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">
+              OpenStreetMap
+            </a>
+          </p>
         </section>
       </aside>
 
       <main className="workspace">
         <div className="workspace-header">
           <p>
-            Scroll to zoom and drag the preview to pan. Use the grouped legend below to
-            hide individual areas, ways, or POIs from the stitched map.
+            Scroll or double-click to zoom and drag the preview to pan. Use the grouped
+            legend below to hide individual areas, ways, or POIs from the stitched map.
           </p>
 
           <form className="location-search workspace-search" onSubmit={handleLocationSearch}>
@@ -1135,6 +1163,7 @@ export function App() {
                   onPointerMove={handleCanvasPointerMove}
                   onPointerUp={finishCanvasDrag}
                   onPointerCancel={finishCanvasDrag}
+                  onDoubleClick={handleCanvasDoubleClick}
                   style={previewCanvasStyle}
                 />
               </div>

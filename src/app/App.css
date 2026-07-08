@@ -47,11 +47,6 @@
   margin-bottom: 1.5rem;
 }
 
-.section-note {
-  margin: 0;
-  color: #42554d;
-}
-
 .control-row {
   display: grid;
   gap: 0.4rem;
@@ -162,6 +157,24 @@
   grid-template-columns: 1fr;
   gap: 0.7rem;
   margin-top: 1.35rem;
+}
+
+.sidebar-attribution {
+  margin: 0;
+  color: #54655d;
+  font-size: 0.84rem;
+  line-height: 1.5;
+}
+
+.sidebar-attribution a {
+  color: inherit;
+  text-decoration-color: rgba(31, 103, 93, 0.45);
+  text-underline-offset: 0.12em;
+}
+
+.sidebar-attribution a:hover {
+  color: #1f675d;
+  text-decoration-color: currentColor;
 }
 
 .button,
