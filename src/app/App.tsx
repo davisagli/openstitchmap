@@ -1,5 +1,9 @@
 import { useDeferredValue, useEffect, useRef, useState, useTransition } from 'react';
-import type { PointerEvent as ReactPointerEvent, WheelEvent as ReactWheelEvent } from 'react';
+import type {
+  FormEvent as ReactFormEvent,
+  PointerEvent as ReactPointerEvent,
+  WheelEvent as ReactWheelEvent,
+} from 'react';
 import './App.css';
 import type { BBox, MapFeature, Position } from '../core/osm';
 import type { LoadedSourceData } from '../core/tiles/tileSource';
@@ -72,12 +76,22 @@ interface CompiledViewportData {
   availableLegend: LegendEntry[];
 }
 
+interface SearchResult {
+  id: string;
+  label: string;
+  detail: string;
+  lat: number;
+  lon: number;
+  bbox: BBox | null;
+}
+
 const HOSTED_TILEJSON_URL = 'https://tiles.openfreemap.org/planet';
 const defaultAreaPreset = areaPresets[0];
 const SLIPPY_VIEW_HEIGHT_TILES = 1;
 const PREVIEW_OVERSCAN_FACTOR = 1.45;
 const PREVIEW_PADDING = 24;
 const FABRIC_COUNTS: FabricCount[] = [14, 16, 18];
+const NOMINATIM_SEARCH_URL = 'https://nominatim.openstreetmap.org/search';
 
 const defaultSettings: Settings = {
   center: defaultAreaPreset.center,
@@ -103,6 +117,10 @@ function inches(stitches: number, fabricCount: number): string {
 
 function clampZoom(value: number): number {
   return Math.min(16, Math.max(10, Math.round(value)));
+}
+
+function viewportSpanX(width: number, height: number): number {
+  return SLIPPY_VIEW_HEIGHT_TILES * Math.max(0.5, width / Math.max(1, height));
 }
 
 function viewportBBox(
@@ -262,9 +280,105 @@ function buildVisiblePattern(
   });
 }
 
+function formatSearchDetail(parts: Array<string | null | undefined>): string {
+  return parts.filter((part) => part && part.trim().length > 0).join(', ');
+}
+
+function parseSearchBBox(raw: unknown): BBox | null {
+  if (!Array.isArray(raw) || raw.length < 4) {
+    return null;
+  }
+
+  const [south, north, west, east] = raw.map((value) => Number(value));
+  if ([south, north, west, east].some((value) => Number.isNaN(value))) {
+    return null;
+  }
+
+  return {
+    minLon: west,
+    minLat: south,
+    maxLon: east,
+    maxLat: north,
+  };
+}
+
+function searchBBoxToZoom(
+  bbox: BBox | null,
+  width: number,
+  height: number,
+  fallbackZoom: number,
+): number {
+  if (!bbox) {
+    return fallbackZoom;
+  }
+
+  const northWest = lonLatToWorld(bbox.minLon, bbox.maxLat, 0);
+  const southEast = lonLatToWorld(bbox.maxLon, bbox.minLat, 0);
+  const bboxWidth = Math.max(0.00001, Math.abs(southEast.x - northWest.x));
+  const bboxHeight = Math.max(0.00001, Math.abs(southEast.y - northWest.y));
+  const fitScale = Math.min(
+    (viewportSpanX(width, height) * 0.82) / bboxWidth,
+    (SLIPPY_VIEW_HEIGHT_TILES * 0.82) / bboxHeight,
+  );
+
+  return clampZoom(Math.floor(Math.log2(Math.max(fitScale, 1e-6))));
+}
+
+function normalizeSearchResult(value: unknown): SearchResult | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  const result = value as Record<string, unknown>;
+  const lat = Number(result.lat);
+  const lon = Number(result.lon);
+  if (Number.isNaN(lat) || Number.isNaN(lon)) {
+    return null;
+  }
+
+  const displayName = typeof result.display_name === 'string' ? result.display_name : 'Unnamed place';
+  const name =
+    typeof result.name === 'string' && result.name.trim().length > 0
+      ? result.name
+      : displayName.split(',')[0]?.trim() || displayName;
+  const address =
+    typeof result.address === 'object' && result.address
+      ? (result.address as Record<string, unknown>)
+      : null;
+  const detail = formatSearchDetail([
+    typeof result.type === 'string' ? result.type : null,
+    address
+      ? formatSearchDetail([
+          typeof address.city === 'string'
+            ? address.city
+            : typeof address.town === 'string'
+              ? address.town
+              : typeof address.village === 'string'
+                ? address.village
+                : null,
+          typeof address.state === 'string' ? address.state : null,
+          typeof address.country === 'string' ? address.country : null,
+        ])
+      : displayName.split(',').slice(1).join(',').trim(),
+  ]);
+
+  return {
+    id:
+      typeof result.place_id === 'number' || typeof result.place_id === 'string'
+        ? String(result.place_id)
+        : `${lat},${lon}`,
+    label: name,
+    detail: detail || displayName,
+    lat,
+    lon,
+    bbox: parseSearchBBox(result.boundingbox),
+  };
+}
+
 export function App() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const previewViewportRef = useRef<HTMLDivElement | null>(null);
+  const searchAbortRef = useRef<AbortController | null>(null);
   const dragRef = useRef<{
     pointerId: number;
     startMotion: PreviewMotion | null;
@@ -287,6 +401,10 @@ export function App() {
   const [sourceError, setSourceError] = useState<string | null>(null);
   const [isRefreshingPreview, setIsRefreshingPreview] = useState(true);
   const [isPending, startTransition] = useTransition();
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
+  const [searchError, setSearchError] = useState<string | null>(null);
+  const [searchStatus, setSearchStatus] = useState<'idle' | 'loading' | 'done'>('idle');
 
   useEffect(() => {
     let cancelled = false;
@@ -513,11 +631,87 @@ export function App() {
     setPreviewMotion((current) => (current ? null : current));
   }, [pattern, previewPattern, viewMode]);
 
+  useEffect(() => () => {
+    searchAbortRef.current?.abort();
+  }, []);
+
   function updateSettings<K extends keyof Settings>(key: K, value: Settings[K]) {
     setSettings((current) => ({
       ...current,
       [key]: value,
     }));
+  }
+
+  function jumpToSearchResult(result: SearchResult) {
+    setSettings((current) => ({
+      ...current,
+      center: {
+        lat: result.lat,
+        lon: result.lon,
+      },
+      zoomHint: searchBBoxToZoom(result.bbox, current.width, current.height, current.zoomHint),
+    }));
+    setPreviewMotion(null);
+  }
+
+  async function handleLocationSearch(event: ReactFormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const query = searchQuery.trim();
+    if (!query) {
+      setSearchResults([]);
+      setSearchError('Type a place name, neighborhood, or address to search.');
+      setSearchStatus('idle');
+      return;
+    }
+
+    searchAbortRef.current?.abort();
+    const abortController = new AbortController();
+    searchAbortRef.current = abortController;
+
+    setSearchStatus('loading');
+    setSearchError(null);
+
+    try {
+      const params = new URLSearchParams({
+        q: query,
+        format: 'jsonv2',
+        limit: '5',
+        addressdetails: '1',
+      });
+      const response = await fetch(`${NOMINATIM_SEARCH_URL}?${params.toString()}`, {
+        signal: abortController.signal,
+        headers: {
+          Accept: 'application/json',
+        },
+      });
+
+      if (!response.ok) {
+        throw new Error(`Search failed with status ${response.status}.`);
+      }
+
+      const payload: unknown = await response.json();
+      const results = Array.isArray(payload)
+        ? payload.map(normalizeSearchResult).filter((result): result is SearchResult => Boolean(result))
+        : [];
+
+      setSearchResults(results);
+      setSearchStatus('done');
+      setSearchError(results.length ? null : `No matches found for "${query}".`);
+    } catch (error: unknown) {
+      if (abortController.signal.aborted) {
+        return;
+      }
+
+      const message =
+        error instanceof Error ? error.message : 'Unable to search for that location right now.';
+      setSearchResults([]);
+      setSearchStatus('done');
+      setSearchError(message);
+    } finally {
+      if (searchAbortRef.current === abortController) {
+        searchAbortRef.current = null;
+      }
+    }
   }
 
   function applyPan(deltaX: number, deltaY: number) {
@@ -879,6 +1073,40 @@ export function App() {
             Scroll to zoom and drag the preview to pan. Use the grouped legend below to
             hide individual areas, ways, or POIs from the stitched map.
           </p>
+
+          <form className="location-search workspace-search" onSubmit={handleLocationSearch}>
+            <div className="search-row">
+              <input
+                className="input"
+                id="location-search"
+                type="search"
+                placeholder="Search for a place or address"
+                value={searchQuery}
+                onChange={(event) => setSearchQuery(event.target.value)}
+              />
+              <button className="button" type="submit" disabled={searchStatus === 'loading'}>
+                {searchStatus === 'loading' ? 'Searching...' : 'Search'}
+              </button>
+            </div>
+
+            {searchError ? <div className="search-feedback">{searchError}</div> : null}
+
+            {searchResults.length ? (
+              <div className="search-results" role="list" aria-label="Search results">
+                {searchResults.map((result) => (
+                  <button
+                    className="search-result"
+                    key={result.id}
+                    type="button"
+                    onClick={() => jumpToSearchResult(result)}
+                  >
+                    <strong>{result.label}</strong>
+                    <span>{result.detail}</span>
+                  </button>
+                ))}
+              </div>
+            ) : null}
+          </form>
         </div>
 
         <section
