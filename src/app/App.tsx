@@ -51,6 +51,7 @@ interface Settings {
   height: number;
   fabricCount: FabricCount;
   detailLevel: DetailLevel;
+  roadNetworkDetail: number;
   zoomHint: number;
   pmtilesUrl: string;
 }
@@ -100,6 +101,7 @@ const defaultSettings: Settings = {
   height: 72,
   fabricCount: 14,
   detailLevel: 'medium',
+  roadNetworkDetail: 18,
   zoomHint: defaultAreaPreset.zoom,
   pmtilesUrl: '',
 };
@@ -118,6 +120,26 @@ function inches(stitches: number, fabricCount: number): string {
 
 function clampZoom(value: number): number {
   return Math.min(16, Math.max(10, Math.round(value)));
+}
+
+function clampRoadNetworkDetail(value: number): number {
+  if (Number.isNaN(value)) {
+    return defaultSettings.roadNetworkDetail;
+  }
+
+  return Math.min(100, Math.max(0, Math.round(value)));
+}
+
+function roadNetworkDetailLabel(value: number): string {
+  if (value < 28) {
+    return 'Prominent';
+  }
+
+  if (value < 62) {
+    return 'Balanced';
+  }
+
+  return 'Dense';
 }
 
 function viewportSpanX(width: number, height: number): number {
@@ -502,6 +524,7 @@ export function App() {
         height: deferredSettings.height,
         detailLevel: deferredSettings.detailLevel,
         includeMinorRoads: true,
+        roadNetworkDetail: deferredSettings.roadNetworkDetail,
       }),
       options: {
         title: `${sourceData.title} Pattern`,
@@ -518,6 +541,7 @@ export function App() {
         height: previewHeight,
         detailLevel: deferredSettings.detailLevel,
         includeMinorRoads: true,
+        roadNetworkDetail: deferredSettings.roadNetworkDetail,
       }),
       options: {
         title: `${sourceData.title} Preview`,
@@ -535,6 +559,7 @@ export function App() {
   }, [
     deferredSettings.detailLevel,
     deferredSettings.height,
+    deferredSettings.roadNetworkDetail,
     deferredSettings.width,
     sourceData,
   ]);
@@ -1052,6 +1077,28 @@ export function App() {
             </div>
 
             <div className="control-row">
+              <div className="control-label-row">
+                <label htmlFor="road-network-detail">Road detail</label>
+                <span>{roadNetworkDetailLabel(settings.roadNetworkDetail)}</span>
+              </div>
+              <input
+                className="range-input"
+                id="road-network-detail"
+                type="range"
+                min={0}
+                max={100}
+                value={settings.roadNetworkDetail}
+                aria-valuetext={roadNetworkDetailLabel(settings.roadNetworkDetail)}
+                onInput={(event) =>
+                  updateSettings('roadNetworkDetail', clampRoadNetworkDetail(Number(event.currentTarget.value)))
+                }
+                onChange={(event) =>
+                  updateSettings('roadNetworkDetail', clampRoadNetworkDetail(Number(event.target.value)))
+                }
+              />
+            </div>
+
+            <div className="control-row">
               <div className="legend-title">Preview mode</div>
               <div className="segmented" role="tablist" aria-label="Preview mode">
                 <button
@@ -1253,9 +1300,18 @@ export function App() {
                       {curationStats.droppedSmallPolygons +
                         curationStats.droppedShortLines +
                         curationStats.droppedOverlappingLines +
-                        curationStats.droppedAdjacentPaths}
+                        curationStats.droppedAdjacentPaths +
+                        curationStats.droppedRoadBudget}
                     </div>
-                    <div className="stat-label">Tiny fills and thinned ways removed</div>
+                    <div className="stat-label">Tiny fills and skipped ways removed</div>
+                  </div>
+                  <div className="stat-tile">
+                    <div className="stat-value">{curationStats.roadsCollapsed}</div>
+                    <div className="stat-label">Parallel way candidates collapsed</div>
+                  </div>
+                  <div className="stat-tile">
+                    <div className="stat-value">{curationStats.droppedRoadBudget}</div>
+                    <div className="stat-label">Road candidates outside detail budget</div>
                   </div>
                 </div>
               </>

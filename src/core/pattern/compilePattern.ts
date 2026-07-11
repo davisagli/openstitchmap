@@ -176,7 +176,6 @@ function lineSimplifyTolerance(kind: LineStyleId): number {
     case 'secondaryRoad':
       return 0.65;
     case 'stream':
-    case 'boundary':
       return 0.45;
     case 'path':
       return 0.35;
@@ -210,6 +209,118 @@ function snapAndSimplifyLine(
     (left, right) => left - right,
   );
   return indexes.map((index) => snapped[index]);
+}
+
+function gridPointKey(point: GridPoint): string {
+  return `${point.x}:${point.y}`;
+}
+
+function roadBackstitchKind(kind: LineStyleId): boolean {
+  return kind === 'primaryRoad' || kind === 'secondaryRoad' || kind === 'path';
+}
+
+function rasterizeGridSegment(from: GridPoint, to: GridPoint): GridPoint[] {
+  const cells: GridPoint[] = [];
+  let currentX = from.x;
+  let currentY = from.y;
+  const dx = Math.abs(to.x - from.x);
+  const dy = Math.abs(to.y - from.y);
+  const stepX = from.x < to.x ? 1 : -1;
+  const stepY = from.y < to.y ? 1 : -1;
+  let error = dx - dy;
+
+  while (true) {
+    cells.push({ x: currentX, y: currentY });
+
+    if (currentX === to.x && currentY === to.y) {
+      break;
+    }
+
+    const doubledError = error * 2;
+    if (doubledError > -dy) {
+      error -= dy;
+      currentX += stepX;
+    }
+    if (doubledError < dx) {
+      error += dx;
+      currentY += stepY;
+    }
+  }
+
+  return cells;
+}
+
+function pruneDisconnectedRoadBackstitches(backstitches: BackstitchSegment[]): BackstitchSegment[] {
+  const roadEntries = backstitches
+    .map((segment, index) => ({
+      cells: rasterizeGridSegment(segment.from, segment.to),
+      index,
+      segment,
+    }))
+    .filter(({ segment }) => roadBackstitchKind(segment.kind));
+
+  if (roadEntries.length < 2) {
+    return backstitches;
+  }
+
+  const parent = roadEntries.map((_, index) => index);
+  const find = (index: number): number => {
+    while (parent[index] !== index) {
+      parent[index] = parent[parent[index]];
+      index = parent[index];
+    }
+
+    return index;
+  };
+  const union = (left: number, right: number): void => {
+    const leftRoot = find(left);
+    const rightRoot = find(right);
+    if (leftRoot !== rightRoot) {
+      parent[rightRoot] = leftRoot;
+    }
+  };
+
+  const occupiedCells = new Map<string, number>();
+  roadEntries.forEach(({ cells }, index) => {
+    for (const cell of cells) {
+      const key = gridPointKey(cell);
+      const previous = occupiedCells.get(key);
+      if (previous === undefined) {
+        occupiedCells.set(key, index);
+      } else {
+        union(previous, index);
+      }
+    }
+  });
+
+  const components = new Map<
+    number,
+    {
+      score: number;
+      indexes: number[];
+    }
+  >();
+
+  roadEntries.forEach(({ index, segment }, roadIndex) => {
+    const root = find(roadIndex);
+    const previous = components.get(root) ?? { score: 0, indexes: [] };
+    const length = distance(segment.from, segment.to);
+    const primaryBonus = segment.kind === 'primaryRoad' ? 1000 : 0;
+    previous.score += length + primaryBonus + 1;
+    previous.indexes.push(index);
+    components.set(root, previous);
+  });
+
+  if (components.size < 2) {
+    return backstitches;
+  }
+
+  const keep = Array.from(components.values()).reduce((best, component) =>
+    component.score > best.score ? component : best,
+  );
+  const keepIndexes = new Set(keep.indexes);
+
+  return backstitches.filter((segment, index) => !roadBackstitchKind(segment.kind) || keepIndexes.has(index));
 }
 
 function pointInRing(point: GridPoint, ring: GridPoint[]): boolean {
@@ -529,10 +640,6 @@ export function classifyLine(feature: LineFeature): LineStyleId | null {
     return 'stream';
   }
 
-  if (feature.tags.boundary) {
-    return 'boundary';
-  }
-
   return null;
 }
 
@@ -767,7 +874,7 @@ export function compilePatternOverlays(
   }
 
   return {
-    backstitches,
+    backstitches: pruneDisconnectedRoadBackstitches(backstitches),
     markers,
   };
 }

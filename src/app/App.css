@@ -52,6 +52,19 @@
   gap: 0.4rem;
 }
 
+.control-label-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.control-label-row span {
+  color: #54655d;
+  font-size: 0.84rem;
+  font-weight: 700;
+}
+
 .location-search {
   display: grid;
   gap: 0.75rem;
@@ -95,6 +108,11 @@
 
 .number-input {
   padding: 0.65rem 0.75rem;
+}
+
+.range-input {
+  width: 100%;
+  accent-color: #1e7a6d;
 }
 
 .radio-fieldset {

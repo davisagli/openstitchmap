@@ -9,6 +9,7 @@ export interface CurateFeaturesOptions {
   height: number;
   detailLevel: DetailLevel;
   includeMinorRoads: boolean;
+  roadNetworkDetail: number;
 }
 
 export interface CurateFeaturesStats {
@@ -22,6 +23,8 @@ export interface CurateFeaturesStats {
   droppedShortLines: number;
   droppedOverlappingLines: number;
   droppedAdjacentPaths: number;
+  droppedRoadBudget: number;
+  roadsCollapsed: number;
   droppedCrowdedMarkers: number;
   droppedMarkerBudget: number;
 }
@@ -77,6 +80,14 @@ interface GridCell {
   y: number;
 }
 
+interface ProjectedWaterPolygon {
+  rings: GridPoint[][];
+  minX: number;
+  maxX: number;
+  minY: number;
+  maxY: number;
+}
+
 interface LineCandidate {
   id: string;
   feature: LineFeature;
@@ -88,6 +99,18 @@ interface LineCandidate {
 }
 
 type GraphRoadRole = 'corridor' | 'connector' | 'duplicate' | 'local';
+
+interface RoadSelectionProfile {
+  maxRoads: number;
+  connectorReserve: number;
+  aggregationRounds: number;
+  minimumScore: number;
+}
+
+interface RoadSelectionResult {
+  selectedIds: Set<string>;
+  droppedBudget: number;
+}
 
 interface GraphCandidateStats {
   branchingEndpoints: number;
@@ -221,6 +244,109 @@ function polygonAreaInCells(feature: PolygonFeature, bbox: BBox, width: number, 
     area += projected[index].x * projected[index + 1].y - projected[index + 1].x * projected[index].y;
   }
   return Math.abs(area) / 2;
+}
+
+function pointInRing(point: GridPoint, ring: GridPoint[]): boolean {
+  let inside = false;
+
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i, i += 1) {
+    const { x: xi, y: yi } = ring[i];
+    const { x: xj, y: yj } = ring[j];
+    const intersects =
+      yi > point.y !== yj > point.y &&
+      point.x < ((xj - xi) * (point.y - yi)) / (yj - yi || 1e-9) + xi;
+
+    if (intersects) {
+      inside = !inside;
+    }
+  }
+
+  return inside;
+}
+
+function pointInProjectedWater(point: GridPoint, polygon: ProjectedWaterPolygon): boolean {
+  if (
+    point.x < polygon.minX ||
+    point.x > polygon.maxX ||
+    point.y < polygon.minY ||
+    point.y > polygon.maxY ||
+    !pointInRing(point, polygon.rings[0])
+  ) {
+    return false;
+  }
+
+  for (let index = 1; index < polygon.rings.length; index += 1) {
+    if (pointInRing(point, polygon.rings[index])) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function projectWaterPolygon(
+  feature: PolygonFeature,
+  bbox: BBox,
+  width: number,
+  height: number,
+): ProjectedWaterPolygon | null {
+  const rings = feature.coordinates
+    .map((ring) => ring.map((point) => projectToGrid(point, bbox, width, height)))
+    .filter((ring) => ring.length >= 4);
+
+  if (!rings.length) {
+    return null;
+  }
+
+  let minX = Number.POSITIVE_INFINITY;
+  let maxX = Number.NEGATIVE_INFINITY;
+  let minY = Number.POSITIVE_INFINITY;
+  let maxY = Number.NEGATIVE_INFINITY;
+
+  for (const ring of rings) {
+    for (const point of ring) {
+      minX = Math.min(minX, point.x);
+      maxX = Math.max(maxX, point.x);
+      minY = Math.min(minY, point.y);
+      maxY = Math.max(maxY, point.y);
+    }
+  }
+
+  return {
+    rings,
+    minX,
+    maxX,
+    minY,
+    maxY,
+  };
+}
+
+function cellInWaterArea(cell: GridCell, waterPolygons: ProjectedWaterPolygon[]): boolean {
+  if (!waterPolygons.length) {
+    return false;
+  }
+
+  const sample = {
+    x: cell.x + 0.5,
+    y: cell.y + 0.5,
+  };
+
+  return waterPolygons.some((polygon) => pointInProjectedWater(sample, polygon));
+}
+
+function waterCoverageRatio(cells: GridCell[], waterPolygons: ProjectedWaterPolygon[]): number {
+  if (!cells.length || !waterPolygons.length) {
+    return 0;
+  }
+
+  let covered = 0;
+  for (const cell of cells) {
+    if (cellInWaterArea(cell, waterPolygons)) {
+      covered += 1;
+    }
+  }
+
+  return covered / cells.length;
 }
 
 function rasterizeSegment(from: GridCell, to: GridCell): GridCell[] {
@@ -425,14 +551,71 @@ function endpointConnectionCount(
   );
 }
 
+function endpointTouchesCells(cells: GridCell[], targetCells: GridCell[], radius: number): boolean {
+  if (!cells.length || !targetCells.length) {
+    return false;
+  }
+
+  const endpoints = cells.length === 1 ? [cells[0]] : [cells[0], cells[cells.length - 1]];
+  return endpoints.some((endpoint) => targetCells.some((cell) => distance(endpoint, cell) <= radius));
+}
+
+function lineRunsOutsideWaterAreas(
+  coordinates: Position[],
+  projected: GridPoint[],
+  waterPolygons: ProjectedWaterPolygon[],
+): Array<{ coordinates: Position[]; projected: GridPoint[] }> {
+  if (!waterPolygons.length || coordinates.length < 2) {
+    return [{ coordinates, projected }];
+  }
+
+  const runs: Array<{ coordinates: Position[]; projected: GridPoint[] }> = [];
+  let currentCoordinates: Position[] = [];
+  let currentProjected: GridPoint[] = [];
+
+  for (let index = 1; index < coordinates.length; index += 1) {
+    const from = snapToGrid(projected[index - 1]);
+    const to = snapToGrid(projected[index]);
+    const cells = from.x === to.x && from.y === to.y ? [from] : rasterizeSegment(from, to);
+    const overWater = waterCoverageRatio(cells, waterPolygons) >= 0.45;
+
+    if (overWater) {
+      if (currentCoordinates.length >= 2) {
+        runs.push({
+          coordinates: currentCoordinates,
+          projected: currentProjected,
+        });
+      }
+      currentCoordinates = [];
+      currentProjected = [];
+      continue;
+    }
+
+    if (!currentCoordinates.length) {
+      currentCoordinates.push(coordinates[index - 1]);
+      currentProjected.push(projected[index - 1]);
+    }
+
+    currentCoordinates.push(coordinates[index]);
+    currentProjected.push(projected[index]);
+  }
+
+  if (currentCoordinates.length >= 2) {
+    runs.push({
+      coordinates: currentCoordinates,
+      projected: currentProjected,
+    });
+  }
+
+  return runs;
+}
+
 function baseLineRank(kind: NonNullable<ReturnType<typeof classifyLine>>): number {
   switch (kind) {
     case 'primaryRoad':
       return 320;
     case 'rail':
       return 290;
-    case 'boundary':
-      return 260;
     case 'stream':
       return 240;
     case 'secondaryRoad':
@@ -491,11 +674,86 @@ function roadDetailBonus(feature: LineFeature): number {
   }
 }
 
+function routeNetwork(feature: LineFeature): string {
+  return (feature.tags.route_1_network ?? feature.tags.network ?? '').toLowerCase();
+}
+
+function routeReference(feature: LineFeature): string | undefined {
+  return (
+    feature.tags.route_1_ref ??
+    feature.tags.ref ??
+    feature.tags.shield_text ??
+    feature.tags.shield_text_1 ??
+    feature.tags.route_num
+  );
+}
+
+function normalizeRouteRef(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/^interstate\s+/, 'i ')
+    .replace(/^state route\s+/, 'sr ')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+function routeContinuityKey(feature: LineFeature): string | null {
+  const rawRef = routeReference(feature);
+  const rawName = feature.name ?? feature.tags.name;
+  const network = routeNetwork(feature);
+  const ref = rawRef ? normalizeRouteRef(rawRef) : '';
+  const compactRef = ref.replace(/\s+/g, '');
+
+  if (compactRef && (network === 'us:i' || network === 'us-interstate' || /^i\d+$/.test(compactRef))) {
+    return `interstate:${compactRef.replace(/^i/, '')}`;
+  }
+
+  if (compactRef && (network === 'us-state' || network.startsWith('us:'))) {
+    return `route:${network}:${compactRef}`;
+  }
+
+  if (compactRef && !['usinterstate', 'usstate', 'road'].includes(compactRef)) {
+    return `route:${compactRef}`;
+  }
+
+  if (rawName) {
+    return `name:${normalizeRouteRef(rawName)}`;
+  }
+
+  return null;
+}
+
+function isInterstateRoute(feature: LineFeature): boolean {
+  const network = routeNetwork(feature);
+  const key = routeContinuityKey(feature);
+  return network === 'us:i' || network === 'us-interstate' || Boolean(key?.startsWith('interstate:'));
+}
+
+function isMajorRouteNameLine(
+  feature: LineFeature,
+  kind: NonNullable<ReturnType<typeof classifyLine>>,
+): boolean {
+  if (feature.tags.source_layer !== 'transportation_name' || kind !== 'primaryRoad') {
+    return false;
+  }
+
+  const detail = roadDetailTag(feature);
+  return Boolean(routeReference(feature)) && ['motorway', 'trunk', 'primary'].includes(detail);
+}
+
 function linePriority(feature: LineFeature, kind: NonNullable<ReturnType<typeof classifyLine>>): number {
   let rank = baseLineRank(kind) + roadDetailBonus(feature);
 
   if (feature.name) {
     rank += 6;
+  }
+
+  if (routeContinuityKey(feature)) {
+    rank += kind === 'primaryRoad' ? 18 : 8;
+  }
+
+  if (isInterstateRoute(feature)) {
+    rank += 72;
   }
 
   if (feature.tags.service) {
@@ -507,7 +765,7 @@ function linePriority(feature: LineFeature, kind: NonNullable<ReturnType<typeof 
   }
 
   if (feature.tags.source_layer === 'transportation_name') {
-    rank -= 90;
+    rank += isMajorRouteNameLine(feature, kind) ? 44 : -90;
   }
 
   return rank;
@@ -608,7 +866,88 @@ function averageProjectedLines(lines: GridPoint[][], sampleCount: number): GridP
   });
 }
 
-function corridorSimilarity(left: LineCandidate, right: LineCandidate): number {
+function representativeRouteCenterline(lines: GridPoint[][]): GridPoint[] | null {
+  const usableLines = lines.filter((line) => line.length >= 2 && lineLength(line) > 0);
+  if (!usableLines.length) {
+    return null;
+  }
+
+  const reference = usableLines.reduce((longest, line) => (lineLength(line) > lineLength(longest) ? line : longest), usableLines[0]);
+  const direction = normalizeVector(headingVector(reference));
+  if (direction.x === 0 && direction.y === 0) {
+    return null;
+  }
+
+  const normal = { x: -direction.y, y: direction.x };
+  const origin = reference[0];
+  const samples = usableLines.flatMap((line) => {
+    const sampleCount = Math.round(clamp(lineLength(line) * 1.25, 4, 96));
+    return resampleProjectedLine(orientProjectedLike(reference, line), sampleCount).map((point) => ({
+      t: dot({ x: point.x - origin.x, y: point.y - origin.y }, direction),
+      n: dot({ x: point.x - origin.x, y: point.y - origin.y }, normal),
+    }));
+  });
+
+  if (samples.length < 2) {
+    return null;
+  }
+
+  const minT = Math.min(...samples.map((sample) => sample.t));
+  const maxT = Math.max(...samples.map((sample) => sample.t));
+  const span = maxT - minT;
+  if (span <= 0) {
+    return null;
+  }
+
+  const sampleCount = Math.round(clamp(span * 1.2, 8, 120));
+  const step = span / Math.max(1, sampleCount - 1);
+  const centerline = Array.from({ length: sampleCount }, (_, index) => {
+    const t = minT + step * index;
+    const window = Math.max(1.5, step * 1.35);
+    let nearby = samples.filter((sample) => Math.abs(sample.t - t) <= window);
+
+    if (!nearby.length) {
+      nearby = [...samples]
+        .sort((left, right) => Math.abs(left.t - t) - Math.abs(right.t - t))
+        .slice(0, 4);
+    }
+
+    const total = nearby.reduce(
+      (accumulator, sample) => ({
+        weight: accumulator.weight + 1,
+        n: accumulator.n + sample.n,
+      }),
+      { weight: 0, n: 0 },
+    );
+    const n = total.weight === 0 ? 0 : total.n / total.weight;
+
+    return {
+      x: origin.x + direction.x * t + normal.x * n,
+      y: origin.y + direction.y * t + normal.y * n,
+    };
+  });
+
+  return dedupeProjectedPoints(centerline);
+}
+
+function dedupeProjectedPoints(points: GridPoint[]): GridPoint[] {
+  if (!points.length) {
+    return points;
+  }
+
+  const deduped = [points[0]];
+  for (let index = 1; index < points.length; index += 1) {
+    const previous = deduped[deduped.length - 1];
+    const current = points[index];
+    if (distance(previous, current) >= 0.35) {
+      deduped.push(current);
+    }
+  }
+
+  return deduped;
+}
+
+function corridorSimilarity(left: LineCandidate, right: LineCandidate, radius = 1): number {
   const leftCells = flattenUniqueCells(rasterizeProjectedLine(left.projected));
   const rightCells = flattenUniqueCells(rasterizeProjectedLine(right.projected));
   if (!leftCells.length || !rightCells.length) {
@@ -620,13 +959,25 @@ function corridorSimilarity(left: LineCandidate, right: LineCandidate): number {
   updateOccupancy(rightCells, rightOccupied, right.rank);
   updateOccupancy(leftCells, leftOccupied, left.rank);
 
-  const leftCoverage = nearbyCoverageRatio(leftCells, rightOccupied, right.rank - 40, 1);
-  const rightCoverage = nearbyCoverageRatio(rightCells, leftOccupied, left.rank - 40, 1);
+  const leftCoverage = nearbyCoverageRatio(leftCells, rightOccupied, right.rank - 40, radius);
+  const rightCoverage = nearbyCoverageRatio(rightCells, leftOccupied, left.rank - 40, radius);
   return Math.min(leftCoverage, rightCoverage);
 }
 
 function isGraphRoadCandidate(candidate: LineCandidate): boolean {
   return candidate.kind === 'primaryRoad' || candidate.kind === 'secondaryRoad' || candidate.kind === 'rail';
+}
+
+function isCollapsibleRoadCandidate(candidate: LineCandidate): boolean {
+  if (candidate.kind === 'primaryRoad' || candidate.kind === 'rail') {
+    return true;
+  }
+
+  return candidate.kind === 'secondaryRoad' && candidate.rank >= 230 && !candidate.feature.tags.service;
+}
+
+function canShareRoadCenterline(left: LineCandidate, right: LineCandidate): boolean {
+  return left.kind === right.kind && isCollapsibleRoadCandidate(left) && isCollapsibleRoadCandidate(right);
 }
 
 function edgeKey(left: GridCell, right: GridCell): string {
@@ -729,8 +1080,8 @@ function buildSnappedRoadGraph(candidates: LineCandidate[]): SnappedRoadGraph {
   }
 
   const duplicateAnchors = new Map<string, string>();
-  const primaryCandidates = candidates
-    .filter((candidate) => candidate.kind === 'primaryRoad')
+  const collapsibleCandidates = candidates
+    .filter(isCollapsibleRoadCandidate)
     .sort((left, right) => {
       const rankDifference = right.rank - left.rank;
       if (rankDifference !== 0) {
@@ -742,7 +1093,7 @@ function buildSnappedRoadGraph(candidates: LineCandidate[]): SnappedRoadGraph {
 
   const corridorAnchors: LineCandidate[] = [];
 
-  for (const candidate of primaryCandidates) {
+  for (const candidate of collapsibleCandidates) {
     const candidateStatsEntry = candidateStats.get(candidate.id);
     if (!candidateStatsEntry) {
       corridorAnchors.push(candidate);
@@ -753,22 +1104,23 @@ function buildSnappedRoadGraph(candidates: LineCandidate[]): SnappedRoadGraph {
 
     for (const anchor of corridorAnchors) {
       const anchorStats = candidateStats.get(anchor.id);
-      if (!anchorStats) {
+      if (!anchorStats || !canShareRoadCenterline(anchor, candidate)) {
         continue;
       }
 
-      const similarity = corridorSimilarity(anchor, candidate);
+      const similarity = corridorSimilarity(anchor, candidate, 2);
       const headingSimilarity = Math.abs(lineHeadingSimilarity(anchor.projected, candidate.projected));
       const lengthRatio = Math.min(anchor.length, candidate.length) / Math.max(anchor.length, candidate.length);
       const importanceGap = anchorStats.importance - candidateStatsEntry.importance;
+      const isRailPair = anchor.kind === 'rail' && candidate.kind === 'rail';
 
       if (
-        similarity >= 0.63 &&
-        headingSimilarity >= 0.74 &&
-        lengthRatio >= 0.4 &&
+        similarity >= (isRailPair ? 0.48 : 0.58) &&
+        headingSimilarity >= (isRailPair ? 0.68 : 0.74) &&
+        lengthRatio >= (isRailPair ? 0.25 : 0.35) &&
         importanceGap >= -1 &&
-        candidateStatsEntry.junctionCount <= anchorStats.junctionCount + 1 &&
-        candidateStatsEntry.branchingEndpoints <= anchorStats.branchingEndpoints + 1
+        candidateStatsEntry.junctionCount <= anchorStats.junctionCount + (isRailPair ? 3 : 1) &&
+        candidateStatsEntry.branchingEndpoints <= anchorStats.branchingEndpoints + (isRailPair ? 2 : 1)
       ) {
         matchedAnchorId = anchor.id;
         break;
@@ -788,8 +1140,13 @@ function buildSnappedRoadGraph(candidates: LineCandidate[]): SnappedRoadGraph {
   for (const candidate of candidates) {
     const stats = candidateStats.get(candidate.id);
 
+    if (duplicateAnchors.has(candidate.id)) {
+      candidateRoles.set(candidate.id, 'duplicate');
+      continue;
+    }
+
     if (candidate.kind === 'primaryRoad') {
-      candidateRoles.set(candidate.id, duplicateAnchors.has(candidate.id) ? 'duplicate' : 'corridor');
+      candidateRoles.set(candidate.id, 'corridor');
       continue;
     }
 
@@ -833,55 +1190,44 @@ function isGraphConnector(candidate: LineCandidate, graph: SnappedRoadGraph): bo
   return graph.candidateRoles.get(candidate.id) === 'connector';
 }
 
-function collapsePrimaryCorridors(
+function collapseParallelRoadCorridors(
   candidates: LineCandidate[],
   graph: SnappedRoadGraph,
   bbox: BBox,
   width: number,
   height: number,
-): LineCandidate[] {
+): { candidates: LineCandidate[]; collapsedCount: number } {
   const byId = new Map(candidates.map((candidate) => [candidate.id, candidate]));
   const clusters = new Map<string, LineCandidate[]>();
-  const passthrough: LineCandidate[] = [];
+  const duplicateIds = new Set<string>();
 
-  for (const candidate of candidates) {
-    const role = graph.candidateRoles.get(candidate.id) ?? 'corridor';
-
-    if (role === 'duplicate') {
-      const anchorId = graph.duplicateAnchors.get(candidate.id);
-      if (!anchorId) {
-        passthrough.push(candidate);
-        continue;
-      }
-
-      const anchor = byId.get(anchorId);
-      if (!anchor) {
-        passthrough.push(candidate);
-        continue;
-      }
-
-      if (!clusters.has(anchorId)) {
-        clusters.set(anchorId, [anchor]);
-      }
-      clusters.get(anchorId)?.push(candidate);
+  for (const [duplicateId, anchorId] of graph.duplicateAnchors) {
+    const anchor = byId.get(anchorId);
+    const duplicate = byId.get(duplicateId);
+    if (!anchor || !duplicate) {
       continue;
     }
 
-    if (role === 'corridor') {
-      if (!clusters.has(candidate.id)) {
-        clusters.set(candidate.id, [candidate]);
-      }
-      continue;
+    duplicateIds.add(duplicateId);
+
+    if (!clusters.has(anchorId)) {
+      clusters.set(anchorId, [anchor]);
     }
 
-    passthrough.push(candidate);
+    clusters.get(anchorId)?.push(duplicate);
   }
 
   const collapsed: LineCandidate[] = [];
+  let collapsedCount = 0;
 
   for (const anchor of candidates) {
+    if (duplicateIds.has(anchor.id)) {
+      continue;
+    }
+
     const cluster = clusters.get(anchor.id);
     if (!cluster) {
+      collapsed.push(anchor);
       continue;
     }
 
@@ -891,12 +1237,12 @@ function collapsePrimaryCorridors(
     }
 
     const orientedProjected = cluster.map((candidate) => orientProjectedLike(anchor.projected, candidate.projected));
-    const sampleCount = Math.max(
-      6,
-      Math.round(Math.max(...orientedProjected.map((projected) => lineLength(projected))) * 1.25),
+    const sampleCount = Math.round(
+      clamp(Math.max(...orientedProjected.map((projected) => lineLength(projected))) * 1.15, 6, 72),
     );
     const averagedProjected = averageProjectedLines(orientedProjected, sampleCount);
     const averagedCoordinates = averagedProjected.map((point) => unprojectFromGrid(point, bbox, width, height));
+    collapsedCount += cluster.length - 1;
 
     collapsed.push({
       id: anchor.id,
@@ -909,11 +1255,871 @@ function collapsePrimaryCorridors(
     });
   }
 
-  return [...collapsed, ...passthrough];
+  return {
+    candidates: collapsed,
+    collapsedCount,
+  };
+}
+
+function collapseRouteReferenceCorridors(
+  candidates: LineCandidate[],
+  bbox: BBox,
+  width: number,
+  height: number,
+): { candidates: LineCandidate[]; collapsedCount: number } {
+  const routeGroups = new Map<string, LineCandidate[]>();
+
+  for (const candidate of candidates) {
+    const key = routeContinuityKey(candidate.feature);
+    if (
+      !key ||
+      !routeReference(candidate.feature) ||
+      candidate.kind !== 'primaryRoad' ||
+      roadDetailTag(candidate.feature).endsWith('_link')
+    ) {
+      continue;
+    }
+
+    routeGroups.set(key, [...(routeGroups.get(key) ?? []), candidate]);
+  }
+
+  const collapsedIds = new Set<string>();
+  const routeCenterlines: LineCandidate[] = [];
+  let collapsedCount = 0;
+
+  for (const [key, group] of routeGroups.entries()) {
+    const uniqueGroup = group.filter((candidate) => !collapsedIds.has(candidate.id));
+    const totalLength = uniqueGroup.reduce((sum, candidate) => sum + candidate.length, 0);
+    if (uniqueGroup.length < 2 || totalLength < 18) {
+      continue;
+    }
+
+    const projected = representativeRouteCenterline(uniqueGroup.map((candidate) => candidate.projected));
+    if (!projected || projected.length < 2 || lineLength(projected) < 8) {
+      continue;
+    }
+
+    const anchor = uniqueGroup.reduce((best, candidate) => {
+      if (candidate.rank !== best.rank) {
+        return candidate.rank > best.rank ? candidate : best;
+      }
+
+      return candidate.length > best.length ? candidate : best;
+    }, uniqueGroup[0]);
+    const coordinates = projected.map((point) => unprojectFromGrid(point, bbox, width, height));
+    const idKey = key.replace(/[^a-z0-9]+/gi, '-');
+
+    uniqueGroup.forEach((candidate) => collapsedIds.add(candidate.id));
+    collapsedCount += uniqueGroup.length - 1;
+    routeCenterlines.push({
+      id: `route-centerline:${idKey}`,
+      feature: {
+        ...anchor.feature,
+        id: `${anchor.feature.id}:route-centerline`,
+        coordinates,
+      },
+      kind: anchor.kind,
+      coordinates,
+      projected,
+      rank: Math.max(...uniqueGroup.map((candidate) => candidate.rank)) + Math.min(36, uniqueGroup.length * 5),
+      length: lineLength(projected),
+    });
+  }
+
+  if (!collapsedIds.size) {
+    return {
+      candidates,
+      collapsedCount: 0,
+    };
+  }
+
+  return {
+    candidates: [...candidates.filter((candidate) => !collapsedIds.has(candidate.id)), ...routeCenterlines],
+    collapsedCount,
+  };
 }
 
 function isRoadLike(kind: NonNullable<ReturnType<typeof classifyLine>>): boolean {
   return kind === 'primaryRoad' || kind === 'secondaryRoad' || kind === 'path';
+}
+
+function roadNetworkDetail(value: number): number {
+  if (Number.isNaN(value)) {
+    return 18;
+  }
+
+  return clamp(value, 0, 100);
+}
+
+function roadSelectionProfile(width: number, height: number, detail: number): RoadSelectionProfile {
+  const normalizedDetail = roadNetworkDetail(detail);
+  const sizeScale = clamp(Math.sqrt(width * height) / Math.sqrt(96 * 72), 0.72, 1.65);
+  const detailRatio = normalizedDetail / 100;
+  const maxRoads = Math.round((8 + normalizedDetail * 0.34 + detailRatio * detailRatio * 190) * sizeScale);
+
+  return {
+    maxRoads,
+    connectorReserve: Math.max(4, Math.round(maxRoads * (0.35 + detailRatio * 0.55))),
+    aggregationRounds: Math.round(normalizedDetail / 16),
+    minimumScore: 300 - normalizedDetail * 2.9,
+  };
+}
+
+function roadConnectionRadius(detail: number): number {
+  return roadNetworkDetail(detail) >= 80 ? 3 : 2;
+}
+
+function roadDetailTag(feature: LineFeature): string {
+  return (
+    feature.tags.class ??
+    feature.tags.subclass ??
+    feature.tags.kind ??
+    feature.tags.kind_detail ??
+    feature.tags.highway ??
+    ''
+  ).toLowerCase();
+}
+
+function roadCandidateScore(candidate: LineCandidate, graph: SnappedRoadGraph): number {
+  const role = graph.candidateRoles.get(candidate.id) ?? 'local';
+  const stats = graph.candidateStats.get(candidate.id);
+  const detail = roadDetailTag(candidate.feature);
+  const routeKey = routeContinuityKey(candidate.feature);
+  let score =
+    candidate.rank +
+    Math.min(58, candidate.length * 2.1) +
+    (stats?.importance ?? 0) * 8 +
+    (candidate.feature.name ? 10 : 0);
+
+  if (candidate.kind === 'primaryRoad') {
+    score += 34;
+  } else if (candidate.kind === 'secondaryRoad') {
+    score += 4;
+  } else if (candidate.kind === 'path') {
+    score -= 12;
+  }
+
+  if (routeKey) {
+    score += candidate.kind === 'primaryRoad' ? 22 : 8;
+  }
+
+  if (isInterstateRoute(candidate.feature)) {
+    score += 88;
+  } else if (routeNetwork(candidate.feature) === 'us-state') {
+    score += 14;
+  }
+
+  if (isMajorRouteNameLine(candidate.feature, candidate.kind)) {
+    score += 52;
+  }
+
+  if (role === 'corridor') {
+    score += 24;
+  } else if (role === 'connector') {
+    score += 34;
+  } else if (role === 'duplicate') {
+    score -= 90;
+  } else {
+    score -= 18;
+  }
+
+  if (detail.endsWith('_link')) {
+    score -= 24;
+  }
+
+  if (candidate.feature.tags.service) {
+    score -= 38;
+  }
+
+  if (isExplicitSidewalk(candidate.feature)) {
+    score -= 72;
+  }
+
+  if (candidate.feature.tags.brunnel === 'tunnel' || candidate.feature.tags.tunnel === 'yes') {
+    score -= 18;
+  }
+
+  return score;
+}
+
+function cellsForCandidate(candidate: LineCandidate, graph: SnappedRoadGraph): GridCell[] {
+  return graph.candidateCells.get(candidate.id) ?? flattenCellPath(rasterizeProjectedLine(candidate.projected));
+}
+
+function canUseRoadCandidate(candidate: LineCandidate, detail: number): boolean {
+  const normalizedDetail = roadNetworkDetail(detail);
+  if (candidate.kind === 'path') {
+    return normalizedDetail >= 72;
+  }
+
+  if (
+    normalizedDetail < 40 &&
+    candidate.kind === 'primaryRoad' &&
+    routeReference(candidate.feature) &&
+    !isInterstateRoute(candidate.feature) &&
+    roadDetailTag(candidate.feature) !== 'motorway' &&
+    candidate.length < 24
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
+function isRouteCenterlineCandidate(candidate: LineCandidate): boolean {
+  return candidate.id.startsWith('route-centerline:');
+}
+
+function isRouteCenterlineFeature(feature: LineFeature): boolean {
+  return feature.id.startsWith('route-centerline:');
+}
+
+function roadCandidateConnectionRadius(candidate: LineCandidate, detail: number): number {
+  const baseRadius = roadConnectionRadius(detail);
+
+  if (isRouteCenterlineCandidate(candidate) && isInterstateRoute(candidate.feature)) {
+    return Math.max(baseRadius, 12);
+  }
+
+  if (isRouteCenterlineCandidate(candidate) || (routeReference(candidate.feature) && candidate.kind === 'primaryRoad')) {
+    return Math.max(baseRadius, 7);
+  }
+
+  return baseRadius;
+}
+
+function isUnlabeledMajorRoadFragment(candidate: LineCandidate): boolean {
+  if (candidate.kind !== 'primaryRoad' || isRouteCenterlineCandidate(candidate)) {
+    return false;
+  }
+
+  const detail = roadDetailTag(candidate.feature);
+  return (
+    !routeReference(candidate.feature) &&
+    !candidate.feature.name &&
+    !candidate.feature.tags.name &&
+    (detail === 'motorway' ||
+      detail === 'trunk' ||
+      detail === 'primary' ||
+      detail === 'motorway_link' ||
+      detail === 'trunk_link' ||
+      detail === 'primary_link')
+  );
+}
+
+function roadCandidateLooksLikeSelectedRouteFragment(
+  candidate: LineCandidate,
+  graph: SnappedRoadGraph,
+  selectedRoadCells: Map<string, number>,
+  selectedRouteCenterlineCells: Map<string, number>,
+  detail: number,
+): boolean {
+  const normalizedDetail = roadNetworkDetail(detail);
+  if (!selectedRouteCenterlineCells.size || !isUnlabeledMajorRoadFragment(candidate)) {
+    return false;
+  }
+
+  const cells = cellsForCandidate(candidate, graph);
+  if (!cells.length) {
+    return false;
+  }
+
+  const role = graph.candidateRoles.get(candidate.id);
+  const stats = graph.candidateStats.get(candidate.id);
+  const radius = normalizedDetail >= 50 ? 3 : 5;
+  const nearbyCoverage = nearbyCoverageRatio(cells, selectedRouteCenterlineCells, Number.NEGATIVE_INFINITY, radius);
+  const duplicateThreshold = normalizedDetail >= 88 ? 0.42 : normalizedDetail >= 50 ? 0.24 : 0.1;
+  if (nearbyCoverage < duplicateThreshold) {
+    return false;
+  }
+
+  const endpointNetworkConnections = endpointConnectionCount(
+    cells,
+    selectedRoadCells,
+    Number.NEGATIVE_INFINITY,
+    roadConnectionRadius(detail),
+  );
+  const endpointRouteConnections = endpointConnectionCount(
+    cells,
+    selectedRouteCenterlineCells,
+    Number.NEGATIVE_INFINITY,
+    radius,
+  );
+  const connectorLike =
+    role === 'connector' ||
+    Boolean(stats && (stats.branchingEndpoints >= 2 || stats.junctionCount >= 1 || stats.importance >= 7));
+  const bridgesAwayFromRoute =
+    connectorLike && endpointNetworkConnections >= 2 && endpointRouteConnections <= 1 && nearbyCoverage < 0.58;
+
+  return !bridgesAwayFromRoute;
+}
+
+function roadCandidateTouchesNetwork(
+  candidate: LineCandidate,
+  graph: SnappedRoadGraph,
+  selectedRoadCells: Map<string, number>,
+  radius: number,
+): boolean {
+  const cells = cellsForCandidate(candidate, graph);
+  if (!cells.length) {
+    return false;
+  }
+
+  return endpointConnectionCount(cells, selectedRoadCells, Number.NEGATIVE_INFINITY, radius) > 0;
+}
+
+function roadCandidateContinuesSelectedRoute(
+  candidate: LineCandidate,
+  graph: SnappedRoadGraph,
+  selectedRoadCells: Map<string, number>,
+  selectedRouteKeys: Set<string>,
+): boolean {
+  const key = routeContinuityKey(candidate.feature);
+  if (!key || !selectedRouteKeys.has(key)) {
+    return false;
+  }
+
+  const cells = cellsForCandidate(candidate, graph);
+  return endpointConnectionCount(cells, selectedRoadCells, Number.NEGATIVE_INFINITY, 7) > 0;
+}
+
+function incrementCellCounts(cells: GridCell[], counts: Map<string, number>): void {
+  for (const cell of cells) {
+    const key = cellKey(cell);
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+}
+
+function buildSelectedRoadCellCounts(
+  candidates: LineCandidate[],
+  selectedIds: Set<string>,
+  graph: SnappedRoadGraph,
+): Map<string, number> {
+  const counts = new Map<string, number>();
+
+  for (const candidate of candidates) {
+    if (!selectedIds.has(candidate.id) || !isRoadLike(candidate.kind)) {
+      continue;
+    }
+
+    incrementCellCounts(cellsForCandidate(candidate, graph), counts);
+  }
+
+  return counts;
+}
+
+function nearestOtherSelectedRoadCell(
+  endpoint: GridCell,
+  selectedCellCounts: Map<string, number>,
+  ownCellCounts: Map<string, number>,
+  radius: number,
+): GridCell | null {
+  let best: { cell: GridCell; distance: number } | null = null;
+  const searchRadius = Math.ceil(radius);
+
+  for (let y = endpoint.y - searchRadius; y <= endpoint.y + searchRadius; y += 1) {
+    for (let x = endpoint.x - searchRadius; x <= endpoint.x + searchRadius; x += 1) {
+      const candidate = { x, y };
+      const candidateDistance = distance(endpoint, candidate);
+      if (candidateDistance > radius) {
+        continue;
+      }
+
+      const key = cellKey(candidate);
+      const otherCount = (selectedCellCounts.get(key) ?? 0) - (ownCellCounts.get(key) ?? 0);
+      if (otherCount <= 0) {
+        continue;
+      }
+
+      if (!best || candidateDistance < best.distance) {
+        best = {
+          cell: candidate,
+          distance: candidateDistance,
+        };
+      }
+    }
+  }
+
+  return best?.cell ?? null;
+}
+
+function endpointCanSnapToNetwork(candidate: LineCandidate, endpoint: GridCell, width: number, height: number): boolean {
+  if (!isRouteCenterlineCandidate(candidate)) {
+    return true;
+  }
+
+  return endpoint.x > 1 && endpoint.x < width - 1 && endpoint.y > 1 && endpoint.y < height - 1;
+}
+
+function snapSelectedRoadEndpointsToNetwork(
+  candidate: LineCandidate,
+  graph: SnappedRoadGraph,
+  selectedCellCounts: Map<string, number>,
+  bbox: BBox,
+  width: number,
+  height: number,
+  detail: number,
+): Pick<LineCandidate, 'coordinates' | 'projected'> {
+  if (candidate.projected.length < 2) {
+    return {
+      coordinates: candidate.coordinates,
+      projected: candidate.projected,
+    };
+  }
+
+  const candidateCells = cellsForCandidate(candidate, graph);
+  const ownCellCounts = new Map<string, number>();
+  incrementCellCounts(candidateCells, ownCellCounts);
+
+  const radius = roadCandidateConnectionRadius(candidate, detail);
+  const projected = candidate.projected.map((point) => ({ ...point }));
+  let changed = false;
+  const startEndpoint = snapToGrid(projected[0]);
+
+  const startTarget = endpointCanSnapToNetwork(candidate, startEndpoint, width, height)
+    ? nearestOtherSelectedRoadCell(startEndpoint, selectedCellCounts, ownCellCounts, radius)
+    : null;
+  if (startTarget) {
+    projected[0] = startTarget;
+    changed = true;
+  }
+
+  const endIndex = projected.length - 1;
+  const endEndpoint = snapToGrid(projected[endIndex]);
+  const endTarget = endpointCanSnapToNetwork(candidate, endEndpoint, width, height)
+    ? nearestOtherSelectedRoadCell(endEndpoint, selectedCellCounts, ownCellCounts, radius)
+    : null;
+  if (endTarget) {
+    projected[endIndex] = endTarget;
+    changed = true;
+  }
+
+  if (!changed) {
+    return {
+      coordinates: candidate.coordinates,
+      projected: candidate.projected,
+    };
+  }
+
+  return {
+    coordinates: projected.map((point) => unprojectFromGrid(point, bbox, width, height)),
+    projected,
+  };
+}
+
+function pruneDisconnectedRoadSelection(
+  selectedIds: Set<string>,
+  scored: Array<{ candidate: LineCandidate; score: number }>,
+  graph: SnappedRoadGraph,
+  detail: number,
+): void {
+  if (selectedIds.size < 2) {
+    return;
+  }
+
+  const selected = scored.filter(({ candidate }) => selectedIds.has(candidate.id));
+  const parent = selected.map((_, index) => index);
+  const cellsByIndex = selected.map(({ candidate }) => cellsForCandidate(candidate, graph));
+  const occupancyByIndex = cellsByIndex.map((cells) => {
+    const occupancy = new Map<string, number>();
+    updateOccupancy(cells, occupancy, 0);
+    return occupancy;
+  });
+  const routeKeys = selected.map(({ candidate }) => routeContinuityKey(candidate.feature));
+  const connectionRadius = roadConnectionRadius(detail);
+
+  const find = (index: number): number => {
+    while (parent[index] !== index) {
+      parent[index] = parent[parent[index]];
+      index = parent[index];
+    }
+
+    return index;
+  };
+
+  const union = (left: number, right: number): void => {
+    const leftRoot = find(left);
+    const rightRoot = find(right);
+    if (leftRoot !== rightRoot) {
+      parent[rightRoot] = leftRoot;
+    }
+  };
+
+  for (let left = 0; left < selected.length; left += 1) {
+    for (let right = left + 1; right < selected.length; right += 1) {
+      const sameRoute = Boolean(routeKeys[left] && routeKeys[left] === routeKeys[right]);
+      const routeCenterlineBridge =
+        (isRouteCenterlineCandidate(selected[left].candidate) || isRouteCenterlineCandidate(selected[right].candidate)) &&
+        (isInterstateRoute(selected[left].candidate.feature) || isInterstateRoute(selected[right].candidate.feature));
+      const radius = sameRoute ? Math.max(connectionRadius, 7) : routeCenterlineBridge ? 12 : connectionRadius;
+      const leftTouchesRight =
+        endpointConnectionCount(cellsByIndex[left], occupancyByIndex[right], Number.NEGATIVE_INFINITY, radius) > 0;
+      const rightTouchesLeft =
+        endpointConnectionCount(cellsByIndex[right], occupancyByIndex[left], Number.NEGATIVE_INFINITY, radius) > 0;
+
+      if (leftTouchesRight || rightTouchesLeft) {
+        union(left, right);
+      }
+    }
+  }
+
+  const groups = new Map<
+    number,
+    {
+      score: number;
+      length: number;
+      count: number;
+      hasInterstate: boolean;
+      hasRouteReference: boolean;
+      hasNamedRoute: boolean;
+    }
+  >();
+
+  selected.forEach(({ candidate, score }, index) => {
+    const root = find(index);
+    const previous = groups.get(root) ?? {
+      score: 0,
+      length: 0,
+      count: 0,
+      hasInterstate: false,
+      hasRouteReference: false,
+      hasNamedRoute: false,
+    };
+    const routeKey = routeContinuityKey(candidate.feature);
+
+    groups.set(root, {
+      score: previous.score + score,
+      length: previous.length + candidate.length,
+      count: previous.count + 1,
+      hasInterstate: previous.hasInterstate || isInterstateRoute(candidate.feature),
+      hasRouteReference: previous.hasRouteReference || Boolean(routeReference(candidate.feature)),
+      hasNamedRoute: previous.hasNamedRoute || Boolean(routeKey?.startsWith('name:')),
+    });
+  });
+
+  let keepRoot: number | null = null;
+  let keepScore = Number.NEGATIVE_INFINITY;
+
+  for (const [root, group] of groups.entries()) {
+    const componentScore =
+      group.score + group.length * 0.5 + group.count * 12 + (group.hasInterstate ? 100_000 : 0);
+    if (componentScore > keepScore) {
+      keepScore = componentScore;
+      keepRoot = root;
+    }
+  }
+
+  if (keepRoot === null || groups.size < 2) {
+    return;
+  }
+
+  const keepRoots = new Set<number>([keepRoot]);
+
+  selected.forEach(({ candidate }, index) => {
+    if (!keepRoots.has(find(index))) {
+      selectedIds.delete(candidate.id);
+    }
+  });
+}
+
+function pruneCuratedDisconnectedRoads(
+  curated: MapFeature[],
+  bbox: BBox,
+  width: number,
+  height: number,
+): number {
+  const roads = curated
+    .map((feature, index) => {
+      if (feature.type !== 'line') {
+        return null;
+      }
+
+      const kind = classifyLine(feature);
+      if (!kind || !isRoadLike(kind)) {
+        return null;
+      }
+
+      const projected = feature.coordinates.map((point) => projectToGrid(point, bbox, width, height));
+      const cells = flattenCellPath(rasterizeProjectedLine(projected));
+      if (cells.length < 2) {
+        return null;
+      }
+
+      return {
+        feature,
+        index,
+        kind,
+        cells,
+        length: lineLength(projected),
+        routeKey: routeContinuityKey(feature),
+        score: linePriority(feature, kind) + lineLength(projected),
+        hasInterstate: isInterstateRoute(feature),
+        hasRouteReference: Boolean(routeReference(feature)),
+      };
+    })
+    .filter((entry): entry is NonNullable<typeof entry> => Boolean(entry));
+
+  if (roads.length < 2) {
+    return 0;
+  }
+
+  const parent = roads.map((_, index) => index);
+  const find = (index: number): number => {
+    while (parent[index] !== index) {
+      parent[index] = parent[parent[index]];
+      index = parent[index];
+    }
+
+    return index;
+  };
+  const union = (left: number, right: number): void => {
+    const leftRoot = find(left);
+    const rightRoot = find(right);
+    if (leftRoot !== rightRoot) {
+      parent[rightRoot] = leftRoot;
+    }
+  };
+
+  for (let left = 0; left < roads.length; left += 1) {
+    for (let right = left + 1; right < roads.length; right += 1) {
+      const sameRoute = Boolean(roads[left].routeKey && roads[left].routeKey === roads[right].routeKey);
+      const routeCenterlineBridge =
+        (isRouteCenterlineFeature(roads[left].feature) || isRouteCenterlineFeature(roads[right].feature)) &&
+        (roads[left].hasInterstate || roads[right].hasInterstate);
+      const radius = sameRoute ? 7 : routeCenterlineBridge ? 12 : 2;
+      const leftTouchesRight = endpointTouchesCells(roads[left].cells, roads[right].cells, radius);
+      const rightTouchesLeft = endpointTouchesCells(roads[right].cells, roads[left].cells, radius);
+
+      if (leftTouchesRight || rightTouchesLeft) {
+        union(left, right);
+      }
+    }
+  }
+
+  const groups = new Map<
+    number,
+    {
+      count: number;
+      score: number;
+      length: number;
+      hasInterstate: boolean;
+      hasRouteReference: boolean;
+      hasNamedRoute: boolean;
+    }
+  >();
+
+  roads.forEach((road, index) => {
+    const root = find(index);
+    const previous = groups.get(root) ?? {
+      count: 0,
+      score: 0,
+      length: 0,
+      hasInterstate: false,
+      hasRouteReference: false,
+      hasNamedRoute: false,
+    };
+
+    groups.set(root, {
+      count: previous.count + 1,
+      score: previous.score + road.score,
+      length: previous.length + road.length,
+      hasInterstate: previous.hasInterstate || road.hasInterstate,
+      hasRouteReference: previous.hasRouteReference || road.hasRouteReference,
+      hasNamedRoute: previous.hasNamedRoute || Boolean(road.routeKey?.startsWith('name:')),
+    });
+  });
+
+  if (groups.size < 2) {
+    return 0;
+  }
+
+  let keepRoot: number | null = null;
+  let keepScore = Number.NEGATIVE_INFINITY;
+  for (const [root, group] of groups.entries()) {
+    const score = group.score + group.count * 16 + (group.hasInterstate ? 100_000 : 0);
+    if (score > keepScore) {
+      keepRoot = root;
+      keepScore = score;
+    }
+  }
+
+  if (keepRoot === null) {
+    return 0;
+  }
+
+  const keepRoots = new Set<number>([keepRoot]);
+
+  const droppedIndices = new Set<number>();
+  roads.forEach((road, index) => {
+    if (!keepRoots.has(find(index))) {
+      droppedIndices.add(road.index);
+    }
+  });
+
+  for (let index = curated.length - 1; index >= 0; index -= 1) {
+    if (droppedIndices.has(index)) {
+      curated.splice(index, 1);
+    }
+  }
+
+  return droppedIndices.size;
+}
+
+function selectRoadNetworkCandidates(
+  candidates: LineCandidate[],
+  graph: SnappedRoadGraph,
+  width: number,
+  height: number,
+  detail: number,
+): RoadSelectionResult {
+  const profile = roadSelectionProfile(width, height, detail);
+  const normalizedDetail = roadNetworkDetail(detail);
+  const connectionRadius = roadConnectionRadius(detail);
+  const selectedIds = new Set<string>();
+  const selectedRoadCells = new Map<string, number>();
+  const selectedRouteCenterlineCells = new Map<string, number>();
+  const selectedRouteKeys = new Set<string>();
+  const scored = candidates
+    .filter((candidate) => isRoadLike(candidate.kind))
+    .map((candidate) => ({
+      candidate,
+      score: roadCandidateScore(candidate, graph),
+    }))
+    .sort((left, right) => {
+      const scoreDifference = right.score - left.score;
+      if (scoreDifference !== 0) {
+        return scoreDifference;
+      }
+
+      return right.candidate.length - left.candidate.length;
+    });
+
+  const addCandidate = (candidate: LineCandidate, score: number) => {
+    selectedIds.add(candidate.id);
+    const cells = cellsForCandidate(candidate, graph);
+    updateOccupancy(cells, selectedRoadCells, score);
+    if (isRouteCenterlineCandidate(candidate)) {
+      updateOccupancy(cells, selectedRouteCenterlineCells, score);
+    }
+    const routeKey = routeContinuityKey(candidate.feature);
+    if (routeKey) {
+      selectedRouteKeys.add(routeKey);
+    }
+  };
+
+  const networkGrowthScore = ({ candidate, score }: { candidate: LineCandidate; score: number }) => {
+    const routeKey = routeContinuityKey(candidate.feature);
+    return score + (routeKey && selectedRouteKeys.has(routeKey) ? 70 : 0);
+  };
+
+  const seed = scored.find(({ candidate, score }) => score >= profile.minimumScore && canUseRoadCandidate(candidate, detail));
+  if (seed) {
+    addCandidate(seed.candidate, seed.score);
+  }
+
+  while (selectedIds.size < profile.maxRoads) {
+    let next: { candidate: LineCandidate; score: number } | null = null;
+
+    for (const entry of scored) {
+      const { candidate, score } = entry;
+      if (
+        selectedIds.has(candidate.id) ||
+        score < profile.minimumScore ||
+        !canUseRoadCandidate(candidate, detail) ||
+        roadCandidateLooksLikeSelectedRouteFragment(candidate, graph, selectedRoadCells, selectedRouteCenterlineCells, detail) ||
+        (!roadCandidateTouchesNetwork(candidate, graph, selectedRoadCells, roadCandidateConnectionRadius(candidate, detail)) &&
+          !roadCandidateContinuesSelectedRoute(candidate, graph, selectedRoadCells, selectedRouteKeys))
+      ) {
+        continue;
+      }
+
+      if (!next || networkGrowthScore(entry) > networkGrowthScore(next)) {
+        next = entry;
+      }
+    }
+
+    if (!next) {
+      break;
+    }
+
+    addCandidate(next.candidate, next.score);
+  }
+
+  if (!selectedIds.size) {
+    return {
+      selectedIds,
+      droppedBudget: scored.length,
+    };
+  }
+
+  const connectorLimit = profile.maxRoads + profile.connectorReserve;
+  const perRoundLimit =
+    profile.aggregationRounds > 0 ? Math.max(1, Math.ceil(profile.connectorReserve / profile.aggregationRounds)) : 0;
+
+  for (let round = 0; round < profile.aggregationRounds && selectedIds.size < connectorLimit; round += 1) {
+    const roundBaseRoadCells = new Map(selectedRoadCells);
+    let addedThisRound = 0;
+
+    for (const { candidate, score } of scored) {
+      if (selectedIds.size >= connectorLimit || addedThisRound >= perRoundLimit) {
+        break;
+      }
+
+      if (
+        selectedIds.has(candidate.id) ||
+        (candidate.kind === 'path' && normalizedDetail < 82) ||
+        roadCandidateLooksLikeSelectedRouteFragment(candidate, graph, selectedRoadCells, selectedRouteCenterlineCells, detail)
+      ) {
+        continue;
+      }
+
+      const role = graph.candidateRoles.get(candidate.id) ?? 'local';
+      const stats = graph.candidateStats.get(candidate.id);
+      if (normalizedDetail < 88 && role !== 'connector' && (stats?.importance ?? 0) < 7) {
+        continue;
+      }
+
+      if (score < profile.minimumScore - (normalizedDetail >= 88 ? 130 : 46)) {
+        continue;
+      }
+
+      const cells = cellsForCandidate(candidate, graph);
+      if (!cells.length) {
+        continue;
+      }
+
+      const endpointConnections = endpointConnectionCount(
+        cells,
+        roundBaseRoadCells,
+        Number.NEGATIVE_INFINITY,
+        roadCandidateConnectionRadius(candidate, detail),
+      );
+      const routeContinuation = roadCandidateContinuesSelectedRoute(
+        candidate,
+        graph,
+        roundBaseRoadCells,
+        selectedRouteKeys,
+      );
+      const novelCellCount = countNearbyNovelCells(cells, selectedRoadCells, Number.NEGATIVE_INFINITY, 1);
+      const minimumNovelCells = Math.max(2, Math.floor(cells.length * 0.08));
+
+      if (novelCellCount >= minimumNovelCells && (endpointConnections > 0 || routeContinuation)) {
+        addCandidate(candidate, score);
+        addedThisRound += 1;
+      }
+    }
+
+    if (addedThisRound === 0) {
+      break;
+    }
+  }
+
+  pruneDisconnectedRoadSelection(selectedIds, scored, graph, detail);
+
+  return {
+    selectedIds,
+    droppedBudget: scored.length - selectedIds.size,
+  };
 }
 
 function isExplicitSidewalk(feature: LineFeature): boolean {
@@ -948,7 +2154,7 @@ function shouldKeepContinuousCandidate(
 
   const nearbyThreshold = candidate.kind === 'primaryRoad' ? candidate.rank - 30 : candidate.rank - 20;
   const nearbyRoadCoverage = nearbyCoverageRatio(cells, occupiedRoads, nearbyThreshold, 1);
-  const exactLineCoverage = coverageRatio(cells, occupiedLines, candidate.rank,);
+  const exactLineCoverage = coverageRatio(cells, occupiedLines, candidate.rank);
   const novelCellCount = countNearbyNovelCells(cells, occupiedRoads, nearbyThreshold, 1);
   const endpointConnections = endpointConnectionCount(cells, occupiedRoads, nearbyThreshold, 1);
   const minimumNovelCells = Math.max(3, Math.floor(cells.length * 0.08));
@@ -1084,6 +2290,8 @@ export function curateFeatures(
     droppedShortLines: 0,
     droppedOverlappingLines: 0,
     droppedAdjacentPaths: 0,
+    droppedRoadBudget: 0,
+    roadsCollapsed: 0,
     droppedCrowdedMarkers: 0,
     droppedMarkerBudget: 0,
   };
@@ -1091,6 +2299,7 @@ export function curateFeatures(
   const polygons = features.filter((feature): feature is PolygonFeature => feature.type === 'polygon');
   const lines = features.filter((feature): feature is LineFeature => feature.type === 'line');
   const points = features.filter((feature): feature is PointFeature => feature.type === 'point');
+  const waterPolygons: ProjectedWaterPolygon[] = [];
 
   for (const polygon of polygons) {
     const style = classifyPolygon(polygon);
@@ -1108,6 +2317,13 @@ export function curateFeatures(
 
     curated.push(polygon);
     stats.polygonsKept += 1;
+
+    if (style.id === 'water') {
+      const waterPolygon = projectWaterPolygon(polygon, options.bbox, options.width, options.height);
+      if (waterPolygon) {
+        waterPolygons.push(waterPolygon);
+      }
+    }
   }
 
   const lineCandidates: LineCandidate[] = [];
@@ -1119,7 +2335,7 @@ export function curateFeatures(
       continue;
     }
 
-    if (line.tags.source_layer === 'transportation_name') {
+    if (line.tags.source_layer === 'transportation_name' && !isMajorRouteNameLine(line, kind)) {
       stats.droppedOverlappingLines += 1;
       continue;
     }
@@ -1147,29 +2363,60 @@ export function curateFeatures(
       continue;
     }
 
-    lineCandidates.push({
-      id: line.id,
-      feature: line,
-      kind,
-      coordinates: simplifiedCoordinates,
-      projected,
-      rank: linePriority(line, kind),
-      length: lineLength(projected),
+    const runs =
+      kind === 'stream'
+        ? lineRunsOutsideWaterAreas(simplifiedCoordinates, projected, waterPolygons)
+        : [{ coordinates: simplifiedCoordinates, projected }];
+
+    if (!runs.length) {
+      stats.droppedOverlappingLines += 1;
+      continue;
+    }
+
+    runs.forEach((run, index) => {
+      const runLength = lineLength(run.projected);
+      if (runLength < profile.minLineLengthCells) {
+        stats.droppedShortLines += 1;
+        return;
+      }
+
+      lineCandidates.push({
+        id: runs.length === 1 ? line.id : `${line.id}:water:${index}`,
+        feature: line,
+        kind,
+        coordinates: run.coordinates,
+        projected: run.projected,
+        rank: linePriority(line, kind),
+        length: runLength,
+      });
     });
   }
 
-  const roadGraph = buildSnappedRoadGraph(lineCandidates);
-  const collapsedPrimaryCandidates = collapsePrimaryCorridors(
-    lineCandidates.filter((candidate) => candidate.kind === 'primaryRoad'),
-    roadGraph,
+  const initialRoadGraph = buildSnappedRoadGraph(lineCandidates);
+  const collapsedRoads = collapseParallelRoadCorridors(
+    lineCandidates,
+    initialRoadGraph,
     options.bbox,
     options.width,
     options.height,
   );
-  const collapsedLineCandidates = [
-    ...collapsedPrimaryCandidates,
-    ...lineCandidates.filter((candidate) => candidate.kind !== 'primaryRoad'),
-  ];
+  const routeCollapsedRoads = collapseRouteReferenceCorridors(
+    collapsedRoads.candidates,
+    options.bbox,
+    options.width,
+    options.height,
+  );
+  const collapsedLineCandidates = routeCollapsedRoads.candidates;
+  const roadGraph = buildSnappedRoadGraph(collapsedLineCandidates);
+  const roadSelection = selectRoadNetworkCandidates(
+    collapsedLineCandidates,
+    roadGraph,
+    options.width,
+    options.height,
+    options.roadNetworkDetail,
+  );
+  stats.roadsCollapsed = collapsedRoads.collapsedCount + routeCollapsedRoads.collapsedCount;
+  stats.droppedRoadBudget = roadSelection.droppedBudget;
 
   collapsedLineCandidates.sort((left, right) => {
     const rankDifference = right.rank - left.rank;
@@ -1182,12 +2429,47 @@ export function curateFeatures(
 
   const occupiedLines = new Map<string, number>();
   const occupiedRoads = new Map<string, number>();
+  const selectedRoadCellCounts = buildSelectedRoadCellCounts(
+    collapsedLineCandidates,
+    roadSelection.selectedIds,
+    roadGraph,
+  );
 
   for (const candidate of collapsedLineCandidates) {
-    const graphRole = roadGraph.candidateRoles.get(candidate.id);
-    const graphImportance = roadGraph.candidateImportance.get(candidate.id) ?? 0;
+    const isSelectedRoad = roadSelection.selectedIds.has(candidate.id);
 
-    if (candidate.kind === 'primaryRoad' || candidate.kind === 'rail') {
+    if (isRoadLike(candidate.kind) && !isSelectedRoad) {
+      continue;
+    }
+
+    if (isRoadLike(candidate.kind) && isSelectedRoad) {
+      const snapped = snapSelectedRoadEndpointsToNetwork(
+        candidate,
+        roadGraph,
+        selectedRoadCellCounts,
+        options.bbox,
+        options.width,
+        options.height,
+        options.roadNetworkDetail,
+      );
+      const keptCells = rasterizeProjectedLine(snapped.projected);
+      curated.push({
+        ...candidate.feature,
+        id: `${candidate.id}:network`,
+        coordinates: snapped.coordinates,
+      });
+      stats.linesKept += 1;
+
+      for (const cells of keptCells) {
+        updateOccupancy(cells, occupiedLines, candidate.rank);
+        if (candidate.kind !== 'path') {
+          updateOccupancy(cells, occupiedRoads, candidate.rank);
+        }
+      }
+      continue;
+    }
+
+    if (candidate.kind === 'rail') {
       if (!shouldKeepContinuousCandidate(candidate, occupiedLines, occupiedRoads, roadGraph)) {
         stats.droppedOverlappingLines += 1;
         continue;
@@ -1196,45 +2478,15 @@ export function curateFeatures(
       const keptCells = rasterizeProjectedLine(candidate.projected);
       curated.push({
         ...candidate.feature,
-        id: `${candidate.feature.id}:continuous`,
+        id: `${candidate.id}:continuous`,
         coordinates: candidate.coordinates,
       });
       stats.linesKept += 1;
 
       for (const cells of keptCells) {
         updateOccupancy(cells, occupiedLines, candidate.rank);
-        if (candidate.kind === 'primaryRoad') {
-          updateOccupancy(cells, occupiedRoads, candidate.rank);
-        }
       }
       continue;
-    }
-
-    if (candidate.kind === 'secondaryRoad' && graphRole === 'connector') {
-      const connectorCells = roadGraph.candidateCells.get(candidate.id) ?? flattenCellPath(rasterizeProjectedLine(candidate.projected));
-      const connectorCoverage = coverageRatio(connectorCells, occupiedLines, candidate.rank);
-      const connectorRoadCoverage = nearbyCoverageRatio(
-        connectorCells,
-        occupiedRoads,
-        candidate.rank - Math.min(32, 14 + graphImportance),
-        1,
-      );
-
-      if (graphImportance >= 5 || connectorCoverage < 0.94 || connectorRoadCoverage < 0.97) {
-        const keptCells = rasterizeProjectedLine(candidate.projected);
-        curated.push({
-          ...candidate.feature,
-          id: `${candidate.feature.id}:connector`,
-          coordinates: candidate.coordinates,
-        });
-        stats.linesKept += 1;
-
-        for (const cells of keptCells) {
-          updateOccupancy(cells, occupiedLines, candidate.rank);
-          updateOccupancy(cells, occupiedRoads, candidate.rank);
-        }
-        continue;
-      }
     }
 
     const thinned = thinLineCandidate(candidate, occupiedLines, occupiedRoads);
@@ -1250,7 +2502,7 @@ export function curateFeatures(
     thinned.keptRuns.forEach((coordinates, index) => {
       curated.push({
         ...candidate.feature,
-        id: `${candidate.feature.id}:thin:${index}`,
+        id: `${candidate.id}:thin:${index}`,
         coordinates,
       });
       stats.linesKept += 1;
@@ -1262,6 +2514,17 @@ export function curateFeatures(
         updateOccupancy(cells, occupiedRoads, candidate.rank);
       }
     }
+  }
+
+  const disconnectedRoadsDropped = pruneCuratedDisconnectedRoads(
+    curated,
+    options.bbox,
+    options.width,
+    options.height,
+  );
+  if (disconnectedRoadsDropped > 0) {
+    stats.linesKept = Math.max(0, stats.linesKept - disconnectedRoadsDropped);
+    stats.droppedRoadBudget += disconnectedRoadsDropped;
   }
 
   const keptMarkerPositions: GridPoint[] = [];

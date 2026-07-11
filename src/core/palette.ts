@@ -11,8 +11,7 @@ export type LineStyleId =
   | 'secondaryRoad'
   | 'path'
   | 'rail'
-  | 'stream'
-  | 'boundary';
+  | 'stream';
 
 export type MarkerStyleId =
   | 'cafe'
@@ -132,13 +131,6 @@ export const lineStyles: Record<LineStyleId, LineStyle> = {
     color: '#2b6f88',
     floss: 'DMC 3810',
     weight: 1.6,
-  },
-  boundary: {
-    id: 'boundary',
-    label: 'Boundary',
-    color: '#8d7867',
-    floss: 'DMC 612',
-    weight: 1.1,
   },
 };
 

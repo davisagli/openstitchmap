@@ -19,7 +19,8 @@
   - only cells with a single-corner minority fill are eligible
   - the minority accent color is preserved in both chart and stitched previews
   - a 3/4 stitch is only kept when both the accent side and the dominant side match adjacent cells, so the feature smooths an existing edge instead of creating extra detail
-- Roads/waterways/boundaries/rail render as backstitch.
+- Roads, waterways, and rail render as backstitch. Administrative boundaries are excluded entirely.
+- Stream backstitch is clipped out where it overlaps a rendered water polygon.
 - POIs render as French-knot-style markers.
 - There is a printable chart preview and a realistic stitched product preview.
 - Chart and stitched previews now use the same cell size and viewport footprint, so the
@@ -35,6 +36,7 @@
   - stitched size
   - fabric count
   - stitch detail (`low` / `medium` / `high`)
+  - road detail (`Prominent` through `Dense`)
   - preview mode (`chart` / `stitched`)
   - export PNG
 - The legend is now the primary feature-filter UI:
@@ -81,16 +83,16 @@
 
 ## Current road-graph approach
 
-- Road candidates are projected into stitch-grid space and rasterized to grid cells.
-- The snapped road graph currently tracks:
-  - per-candidate cell paths
-  - node degrees
-  - candidate roles: `corridor`, `connector`, `duplicate`, `local`
-  - candidate importance
-  - duplicate-to-anchor mapping for primary corridors
-- Primary roads are classified first, then primary duplicates are collapsed after graph analysis.
-- Secondary/link roads with higher graph importance can be kept as connectors before the local thinning pass.
-- Backstitch output is then snapped and simplified again in `compilePattern.ts` so diagonals stay diagonal instead of turning into staircase-like 90-degree jogs.
+- Road selection is now network-growth based rather than a flat per-class budget.
+- Candidates are projected into stitch-grid space, rasterized to occupied cells, and grouped by route continuity using both `ref` and `name`.
+- Named/ref primary routes seed the network. Lower-prominence roads are admitted in repeated aggregation rounds only when they touch the network accumulated so far.
+- The road-detail slider controls the number of aggregation rounds. The default is deliberately selective; the dense end admits most roads that can grow from the existing network.
+- Parallel roads and railways are collapsed before selection. Named motorway/trunk routes also get a representative route centerline so divided interstates render as a single corridor rather than multiple carriageways.
+- Short unlabeled primary fragments near a selected route centerline are treated cautiously. They may bridge selected named routes, but fragments that mostly shadow an interstate are suppressed to avoid ramp/collector clutter.
+- Selected road geometry is rendered directly after endpoint snapping. It no longer goes through the older per-line thinning pass.
+- Connectivity is enforced twice: once after candidate selection and again on compiled road backstitches. Both passes keep the strongest connected component.
+- Interstate centerlines use a larger stitch-grid connection radius so crossings such as I-90 into I-5 survive projection and rounding. Route endpoints on the viewport edge are not pulled inward.
+- Compile-time Douglas-Peucker simplification remains enabled for roads so long diagonals do not become blocky staircases.
 
 ## What looks better now
 
@@ -100,8 +102,10 @@
   dimensional floss, softer cross-stitch shadows, and restrained stitch irregularity.
 - Switching between chart and stitched modes no longer changes the preview dimensions.
 - Multi-lane overlap is reduced compared with the early passes.
+- I-5 and I-90 are each represented by one route-centerline feature in the Seattle validation view.
+- Increasing road detail now grows outward from the selected network instead of revealing arbitrary disconnected local segments.
 - Sidewalk-like paths are more aggressively suppressed when they shadow stronger roads.
-- Some missing-link behavior improved after the snapped graph / connector preservation pass.
+- Final rendered road backstitch is pruned to one connected component in the main Seattle probes.
 - Backstitch diagonals look cleaner after the compile-time line simplification pass.
 - The UI is much quieter than earlier versions:
   - no dataset/source chooser in the active UX
@@ -120,10 +124,12 @@
 ## What still looks rough
 
 - 3/4 stitch smoothing is intentionally conservative and may still leave some edges fully stepped where a human designer might choose a fractional stitch.
-- Major freeway-style corridors are still heuristic, not fully topological.
-- Some ramps / joins are still a little arbitrary: better than before, but not yet confidently “correct”.
-- Primary corridor collapse is still based on similarity + graph role heuristics, not a true corridor-spine extraction.
-- There is no dedicated diagnostics UI yet for graph role counts or why a specific road survived/dropped.
+- Major freeway-style corridors are still heuristic, not fully topological. The larger interstate connection radius intentionally favors visual continuity over exact geography.
+- Parallel-way collapse and route-centerline extraction are proximity/route-label based, not a true medial-axis or corridor-spine algorithm.
+- Connectivity is measured after rasterization into stitch-grid cells. A road can be geographically connected but miss by a cell, which is why endpoint snapping and the interstate bridge radius still exist.
+- The final backstitch connectivity prune keeps one road component. This is effective visually but can discard a legitimate isolated network when the viewport truly contains more than one road system.
+- Dense mode is substantially heavier because it admits hundreds of road candidates; curation still contains pairwise component checks that are a likely performance target.
+- There is no dedicated diagnostics UI yet for why a specific road survived, collapsed, or was excluded.
 - The workspace intro copy still says “Use the grouped legend below…” even though the explicit subgroup headings were removed. That copy is functionally fine but could be tightened.
 - The slippy map still works on a stitch-grid abstraction, not true continuous cartographic rendering, so motion can feel a little approximate when rerenders are fast/slow.
 - The realistic fabric/floss treatment is still experimental and may need tuning across
@@ -138,17 +144,10 @@
 2. Continue tuning fractional-fill heuristics:
    - inspect cases where the new adjacency rule is too strict or too loose
    - consider whether different fill classes should allow different fractional-stitch aggressiveness
-3. Continue road-role diagnostics in the UI:
-   - counts for `corridor`, `connector`, `duplicate`, `local`
-   - maybe a short textual explanation of the current graph pass
-4. Improve graph-role scoring around links/ramps:
-   - better distinguish “useful join into arterial” from “parallel lane fragment”
-5. Split duplicate handling into:
-   - “merge into corridor”
-   - “discard outright”
-6. Make primary corridor selection more corridor-aware at junctions:
-   - choose a corridor spine through major nodes, not just pairwise similarity
-7. Consider making road-graph heuristics inspect `class`, `subclass`, or `*_link` values more directly in the importance score.
+3. Add road-selection diagnostics that explain seed membership, aggregation round, route-centerline collapse, and final component pruning.
+4. Profile dense road selection and replace remaining pairwise component/proximity checks with a spatial index where it materially helps.
+5. Improve route-centerline extraction at junctions so useful named-route joins survive without reintroducing parallel ramps and collector roads.
+6. Revisit whether the final single-component backstitch prune can be replaced by a selection/rendering representation that guarantees the same topology throughout.
 8. If UI polish continues:
    - consider slightly tightening the workspace intro text
    - consider whether diagnostics summary belongs inline with legend/footer copy instead of as its own row
@@ -179,10 +178,12 @@
   - lines -> `classifyLine(...)`
   - points -> `classifyMarker(...)`
 - The app currently always compiles with `includeMinorRoads: true` and relies on legend toggles for hiding classes instead of a dedicated “include minor roads” control.
+- Road density is independent of stitch detail. `roadNetworkDetail` defaults to `18`; its selection profile maps density to repeated network-growth rounds.
+- The road curation/rendering pipeline intentionally favors visual continuity and stitchability over geographic fidelity.
 
 ## Last validated state
 
-- In-browser target: `http://127.0.0.1:4174/`
+- In-browser target: `http://127.0.0.1:5173/`
 - Last manually checked state:
   - OpenFreeMap Seattle waterfront default
   - stitch detail: medium
@@ -194,16 +195,19 @@
   - legend cards are compact and show DMC floss codes
   - extra vertical space sits below the legend rather than inflating the preview frame
   - render interactions were re-checked after the performance pass
+  - road-detail slider defaults to `Prominent`
+  - boundaries are absent and streams are omitted over water fills
+  - I-5 and I-90 route probes each produce one centerline feature
+  - compact Seattle probes at road detail 18, 55, and 100 produce one rendered road component
 - Build status:
   - `npm run build` passed
-- Directional local timings after the latest pass:
-  - chart -> stitched: ~1.14s
-  - stitched -> chart: ~0.25s
-  - hide Primary Road: ~1.16s
-  - show Primary Road: ~0.81s
+- `git diff --check` passed after the latest road pass.
 
 ## Recent commits
 
+- `0f6dd8b` - `Add double-click zoom and preview attribution`
+- `0283be5` - `Add place search for map navigation`
+- `f1dba48` - `Merge rendering performance improvements`
 - `74d256b` - `Improve rendering performance`
 - `518c7ee` - `Make fabric count a radio choice`
 - `c120d49` - `Improve stitched product preview`
