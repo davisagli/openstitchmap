@@ -551,13 +551,85 @@ function endpointConnectionCount(
   );
 }
 
-function endpointTouchesCells(cells: GridCell[], targetCells: GridCell[], radius: number): boolean {
-  if (!cells.length || !targetCells.length) {
-    return false;
+function addCellIndex(cellIndex: Map<string, number[]>, cell: GridCell, index: number): void {
+  const key = cellKey(cell);
+  const indexes = cellIndex.get(key);
+  if (indexes) {
+    indexes.push(index);
+    return;
   }
 
+  cellIndex.set(key, [index]);
+}
+
+function buildCellIndex(cellsByIndex: GridCell[][]): Map<string, number[]> {
+  const cellIndex = new Map<string, number[]>();
+
+  cellsByIndex.forEach((cells, index) => {
+    for (const cell of cells) {
+      addCellIndex(cellIndex, cell, index);
+    }
+  });
+
+  return cellIndex;
+}
+
+function nearbyEndpointIndexes(
+  cells: GridCell[],
+  cellIndex: Map<string, number[]>,
+  radius: number,
+): Set<number> {
+  const indexes = new Set<number>();
   const endpoints = cells.length === 1 ? [cells[0]] : [cells[0], cells[cells.length - 1]];
-  return endpoints.some((endpoint) => targetCells.some((cell) => distance(endpoint, cell) <= radius));
+  const searchRadius = Math.ceil(radius);
+
+  for (const endpoint of endpoints) {
+    for (let y = endpoint.y - searchRadius; y <= endpoint.y + searchRadius; y += 1) {
+      for (let x = endpoint.x - searchRadius; x <= endpoint.x + searchRadius; x += 1) {
+        if (distance(endpoint, { x, y }) > radius) {
+          continue;
+        }
+
+        const cellIndexes = cellIndex.get(cellKey({ x, y }));
+        if (!cellIndexes) {
+          continue;
+        }
+
+        for (const index of cellIndexes) {
+          indexes.add(index);
+        }
+      }
+    }
+  }
+
+  return indexes;
+}
+
+function endpointTouchesIndexedCells(
+  cells: GridCell[],
+  targetIndex: number,
+  cellIndex: Map<string, number[]>,
+  radius: number,
+): boolean {
+  const endpoints = cells.length === 1 ? [cells[0]] : [cells[0], cells[cells.length - 1]];
+  const searchRadius = Math.ceil(radius);
+
+  for (const endpoint of endpoints) {
+    for (let y = endpoint.y - searchRadius; y <= endpoint.y + searchRadius; y += 1) {
+      for (let x = endpoint.x - searchRadius; x <= endpoint.x + searchRadius; x += 1) {
+        if (distance(endpoint, { x, y }) > radius) {
+          continue;
+        }
+
+        const cellIndexes = cellIndex.get(cellKey({ x, y }));
+        if (cellIndexes?.includes(targetIndex)) {
+          return true;
+        }
+      }
+    }
+  }
+
+  return false;
 }
 
 function lineRunsOutsideWaterAreas(
@@ -1720,13 +1792,10 @@ function pruneDisconnectedRoadSelection(
   const selected = scored.filter(({ candidate }) => selectedIds.has(candidate.id));
   const parent = selected.map((_, index) => index);
   const cellsByIndex = selected.map(({ candidate }) => cellsForCandidate(candidate, graph));
-  const occupancyByIndex = cellsByIndex.map((cells) => {
-    const occupancy = new Map<string, number>();
-    updateOccupancy(cells, occupancy, 0);
-    return occupancy;
-  });
+  const cellIndex = buildCellIndex(cellsByIndex);
   const routeKeys = selected.map(({ candidate }) => routeContinuityKey(candidate.feature));
   const connectionRadius = roadConnectionRadius(detail);
+  const maxConnectionRadius = Math.max(connectionRadius, 12);
 
   const find = (index: number): number => {
     while (parent[index] !== index) {
@@ -1746,18 +1815,18 @@ function pruneDisconnectedRoadSelection(
   };
 
   for (let left = 0; left < selected.length; left += 1) {
-    for (let right = left + 1; right < selected.length; right += 1) {
+    for (const right of nearbyEndpointIndexes(cellsByIndex[left], cellIndex, maxConnectionRadius)) {
+      if (right === left) {
+        continue;
+      }
+
       const sameRoute = Boolean(routeKeys[left] && routeKeys[left] === routeKeys[right]);
       const routeCenterlineBridge =
         (isRouteCenterlineCandidate(selected[left].candidate) || isRouteCenterlineCandidate(selected[right].candidate)) &&
         (isInterstateRoute(selected[left].candidate.feature) || isInterstateRoute(selected[right].candidate.feature));
       const radius = sameRoute ? Math.max(connectionRadius, 7) : routeCenterlineBridge ? 12 : connectionRadius;
-      const leftTouchesRight =
-        endpointConnectionCount(cellsByIndex[left], occupancyByIndex[right], Number.NEGATIVE_INFINITY, radius) > 0;
-      const rightTouchesLeft =
-        endpointConnectionCount(cellsByIndex[right], occupancyByIndex[left], Number.NEGATIVE_INFINITY, radius) > 0;
 
-      if (leftTouchesRight || rightTouchesLeft) {
+      if (endpointTouchesIndexedCells(cellsByIndex[left], right, cellIndex, radius)) {
         union(left, right);
       }
     }
@@ -1864,6 +1933,7 @@ function pruneCuratedDisconnectedRoads(
   }
 
   const parent = roads.map((_, index) => index);
+  const cellIndex = buildCellIndex(roads.map((road) => road.cells));
   const find = (index: number): number => {
     while (parent[index] !== index) {
       parent[index] = parent[parent[index]];
@@ -1881,16 +1951,18 @@ function pruneCuratedDisconnectedRoads(
   };
 
   for (let left = 0; left < roads.length; left += 1) {
-    for (let right = left + 1; right < roads.length; right += 1) {
+    for (const right of nearbyEndpointIndexes(roads[left].cells, cellIndex, 12)) {
+      if (right === left) {
+        continue;
+      }
+
       const sameRoute = Boolean(roads[left].routeKey && roads[left].routeKey === roads[right].routeKey);
       const routeCenterlineBridge =
         (isRouteCenterlineFeature(roads[left].feature) || isRouteCenterlineFeature(roads[right].feature)) &&
         (roads[left].hasInterstate || roads[right].hasInterstate);
       const radius = sameRoute ? 7 : routeCenterlineBridge ? 12 : 2;
-      const leftTouchesRight = endpointTouchesCells(roads[left].cells, roads[right].cells, radius);
-      const rightTouchesLeft = endpointTouchesCells(roads[right].cells, roads[left].cells, radius);
 
-      if (leftTouchesRight || rightTouchesLeft) {
+      if (endpointTouchesIndexedCells(roads[left].cells, right, cellIndex, radius)) {
         union(left, right);
       }
     }

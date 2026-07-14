@@ -61,8 +61,64 @@ function adjacentDiagonalCorners(
   }
 }
 
-function drawThread(
-  context: CanvasRenderingContext2D,
+interface ThreadSegment {
+  from: { x: number; y: number };
+  to: { x: number; y: number };
+  bend: number;
+}
+
+interface ThreadStrokeGroup {
+  color: string;
+  width: number;
+  offsetX: number;
+  offsetY: number;
+  segments: ThreadSegment[];
+}
+
+interface ThreadBatch {
+  shadows: Map<string, ThreadStrokeGroup>;
+  mains: Map<string, ThreadStrokeGroup>;
+  highlights: Map<string, ThreadStrokeGroup>;
+}
+
+function createThreadBatch(): ThreadBatch {
+  return {
+    shadows: new Map(),
+    mains: new Map(),
+    highlights: new Map(),
+  };
+}
+
+function threadGroupKey(color: string, width: number, offsetX: number, offsetY: number): string {
+  return `${color}|${width.toFixed(3)}|${offsetX.toFixed(3)}|${offsetY.toFixed(3)}`;
+}
+
+function addThreadStroke(
+  groups: Map<string, ThreadStrokeGroup>,
+  segment: ThreadSegment,
+  color: string,
+  width: number,
+  offsetX: number,
+  offsetY: number,
+): void {
+  const key = threadGroupKey(color, width, offsetX, offsetY);
+  const group = groups.get(key);
+  if (group) {
+    group.segments.push(segment);
+    return;
+  }
+
+  groups.set(key, {
+    color,
+    width,
+    offsetX,
+    offsetY,
+    segments: [segment],
+  });
+}
+
+function addThreadToBatch(
+  batch: ThreadBatch,
   from: { x: number; y: number },
   to: { x: number; y: number },
   color: string,
@@ -70,40 +126,53 @@ function drawThread(
   bend: number,
   profile: 'crossStitch' | 'backstitch' = 'crossStitch',
 ): void {
-  const middleX = (from.x + to.x) / 2 + bend;
-  const middleY = (from.y + to.y) / 2 - bend;
   const isBackstitch = profile === 'backstitch';
   const shadowOffsetX = isBackstitch ? 0.7 : 0.4;
   const shadowOffsetY = isBackstitch ? 0.8 : 0.5;
+  const segment = { from, to, bend };
 
+  addThreadStroke(
+    batch.shadows,
+    segment,
+    isBackstitch ? 'rgba(60, 42, 27, 0.24)' : 'rgba(60, 42, 27, 0.13)',
+    width + (isBackstitch ? 1.4 : 0.8),
+    shadowOffsetX,
+    shadowOffsetY,
+  );
+  addThreadStroke(batch.mains, segment, color, width, 0, 0);
+  addThreadStroke(batch.highlights, segment, 'rgba(255, 255, 255, 0.24)', Math.max(0.6, width * 0.2), -0.35, -0.35);
+}
+
+function strokeThreadGroups(context: CanvasRenderingContext2D, groups: Map<string, ThreadStrokeGroup>): void {
   context.lineCap = 'round';
   context.lineJoin = 'round';
 
-  context.strokeStyle = isBackstitch ? 'rgba(60, 42, 27, 0.24)' : 'rgba(60, 42, 27, 0.13)';
-  context.lineWidth = width + (isBackstitch ? 1.4 : 0.8);
-  context.beginPath();
-  context.moveTo(from.x + shadowOffsetX, from.y + shadowOffsetY);
-  context.quadraticCurveTo(
-    middleX + shadowOffsetX,
-    middleY + shadowOffsetY,
-    to.x + shadowOffsetX,
-    to.y + shadowOffsetY,
-  );
-  context.stroke();
+  for (const group of groups.values()) {
+    context.strokeStyle = group.color;
+    context.lineWidth = group.width;
+    context.beginPath();
 
-  context.strokeStyle = color;
-  context.lineWidth = width;
-  context.beginPath();
-  context.moveTo(from.x, from.y);
-  context.quadraticCurveTo(middleX, middleY, to.x, to.y);
-  context.stroke();
+    for (const segment of group.segments) {
+      const middleX = (segment.from.x + segment.to.x) / 2 + segment.bend;
+      const middleY = (segment.from.y + segment.to.y) / 2 - segment.bend;
 
-  context.strokeStyle = 'rgba(255, 255, 255, 0.24)';
-  context.lineWidth = Math.max(0.6, width * 0.2);
-  context.beginPath();
-  context.moveTo(from.x - 0.35, from.y - 0.35);
-  context.quadraticCurveTo(middleX - 0.35, middleY - 0.35, to.x - 0.35, to.y - 0.35);
-  context.stroke();
+      context.moveTo(segment.from.x + group.offsetX, segment.from.y + group.offsetY);
+      context.quadraticCurveTo(
+        middleX + group.offsetX,
+        middleY + group.offsetY,
+        segment.to.x + group.offsetX,
+        segment.to.y + group.offsetY,
+      );
+    }
+
+    context.stroke();
+  }
+}
+
+function flushThreadBatch(context: CanvasRenderingContext2D, batch: ThreadBatch): void {
+  strokeThreadGroups(context, batch.shadows);
+  strokeThreadGroups(context, batch.mains);
+  strokeThreadGroups(context, batch.highlights);
 }
 
 function drawFabric(
@@ -196,6 +265,8 @@ export function drawStitchPreview(
   context.save();
   context.translate(padding, padding);
 
+  const stitchBatch = createThreadBatch();
+
   for (let y = 0; y < pattern.height; y += 1) {
     for (let x = 0; x < pattern.width; x += 1) {
       const cell = pattern.cells[y][x];
@@ -208,24 +279,24 @@ export function drawStitchPreview(
 
       if (cell.fractional?.kind === 'threeQuarter') {
         const [fullFrom, fullTo] = adjacentDiagonalCorners(cell.fractional.shortCorner);
-        drawThread(
-          context,
+        addThreadToBatch(
+          stitchBatch,
           cornerPoint(left, top, cellSize, fullFrom, inset),
           cornerPoint(left, top, cellSize, fullTo, inset),
           cell.color,
           threadWidth,
           bend,
         );
-        drawThread(
-          context,
+        addThreadToBatch(
+          stitchBatch,
           cornerPoint(left, top, cellSize, cell.fractional.shortCorner, inset),
           center,
           cell.color,
           threadWidth,
           -bend,
         );
-        drawThread(
-          context,
+        addThreadToBatch(
+          stitchBatch,
           cornerPoint(left, top, cellSize, oppositeCorner(cell.fractional.shortCorner), inset),
           center,
           cell.fractional.accent.color,
@@ -233,16 +304,16 @@ export function drawStitchPreview(
           bend,
         );
       } else {
-        drawThread(
-          context,
+        addThreadToBatch(
+          stitchBatch,
           cornerPoint(left, top, cellSize, 'topLeft', inset),
           cornerPoint(left, top, cellSize, 'bottomRight', inset),
           cell.color,
           threadWidth,
           bend,
         );
-        drawThread(
-          context,
+        addThreadToBatch(
+          stitchBatch,
           cornerPoint(left, top, cellSize, 'topRight', inset),
           cornerPoint(left, top, cellSize, 'bottomLeft', inset),
           cell.color,
@@ -253,11 +324,15 @@ export function drawStitchPreview(
     }
   }
 
+  flushThreadBatch(context, stitchBatch);
+
+  const backstitchBatch = createThreadBatch();
+
   for (const segment of pattern.backstitches) {
     const from = { x: segment.from.x * cellSize, y: segment.from.y * cellSize };
     const to = { x: segment.to.x * cellSize, y: segment.to.y * cellSize };
-    drawThread(
-      context,
+    addThreadToBatch(
+      backstitchBatch,
       from,
       to,
       segment.color,
@@ -266,6 +341,8 @@ export function drawStitchPreview(
       'backstitch',
     );
   }
+
+  flushThreadBatch(context, backstitchBatch);
 
   for (const marker of pattern.markers) {
     drawFrenchKnot(
