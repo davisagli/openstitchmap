@@ -94,6 +94,16 @@
 - Interstate centerlines use a larger stitch-grid connection radius so crossings such as I-90 into I-5 survive projection and rounding. Route endpoints on the viewport edge are not pulled inward.
 - Compile-time Douglas-Peucker simplification remains enabled for roads so long diagonals do not become blocky staircases.
 
+## Continuous rail and stream approach
+
+- Railways and streams are now treated as atomic continuous-line candidates during curation.
+- A candidate is either kept whole or discarded as a near-complete duplicate; the generic segment-by-segment thinning pass can no longer punch gaps through its interior.
+- Rail and stream occupancy are tracked separately, so a nearby road cannot accidentally suppress either network.
+- After whole-candidate selection, near-touching endpoints snap to another selected line of the same kind. Rail uses a 2-cell radius and streams use a 1.5-cell radius.
+- Endpoints on the viewport edge are left in place so offscreen continuations are not pulled inward.
+- Stream runs are still clipped where they cross rendered water polygons before continuity selection.
+- Parallel railway collapse still happens before this pass.
+
 ## What looks better now
 
 - Seattle hosted preset is much less cluttered than the initial raw-vector version.
@@ -107,6 +117,7 @@
 - Sidewalk-like paths are more aggressively suppressed when they shadow stronger roads.
 - Final rendered road backstitch is pruned to one connected component in the main Seattle probes.
 - Backstitch diagonals look cleaner after the compile-time line simplification pass.
+- Railways and streams no longer lose arbitrary interior segments to overlap thinning, and small same-network endpoint misses are repaired before rendering.
 - The UI is much quieter than earlier versions:
   - no dataset/source chooser in the active UX
   - no tile zoom/tile span controls
@@ -126,6 +137,7 @@
 - 3/4 stitch smoothing is intentionally conservative and may still leave some edges fully stepped where a human designer might choose a fractional stitch.
 - Major freeway-style corridors are still heuristic, not fully topological. The larger interstate connection radius intentionally favors visual continuity over exact geography.
 - Parallel-way collapse and route-centerline extraction are proximity/route-label based, not a true medial-axis or corridor-spine algorithm.
+- Some primary-route centerlines show wild lateral zigzags. The likely source is `representativeRouteCenterline(...)`: it projects all route fragments onto one global axis and averages lateral offsets, which can jump as fragment coverage changes. Douglas-Peucker does not create the oscillation, but can make it more conspicuous by removing intermediate points.
 - Connectivity is measured after rasterization into stitch-grid cells. A road can be geographically connected but miss by a cell, which is why endpoint snapping and the interstate bridge radius still exist.
 - The final backstitch connectivity prune keeps one road component. This is effective visually but can discard a legitimate isolated network when the viewport truly contains more than one road system.
 - Dense mode is substantially heavier because it admits hundreds of road candidates; curation still contains pairwise component checks that are a likely performance target.
@@ -146,8 +158,12 @@
    - consider whether different fill classes should allow different fractional-stitch aggressiveness
 3. Add road-selection diagnostics that explain seed membership, aggregation round, route-centerline collapse, and final component pruning.
 4. Profile dense road selection and replace remaining pairwise component/proximity checks with a spatial index where it materially helps.
-5. Improve route-centerline extraction at junctions so useful named-route joins survive without reintroducing parallel ramps and collector roads.
+5. Fix route-centerline zigzags before further tuning junction behavior:
+   - use robust local medians instead of raw lateral means
+   - constrain or smooth abrupt lateral changes
+   - fall back to representative source geometry when a route cannot be modeled safely on one global axis
 6. Revisit whether the final single-component backstitch prune can be replaced by a selection/rendering representation that guarantees the same topology throughout.
+7. Add focused rail/stream continuity diagnostics or fixtures, especially for fragmented tile-source geometry and water-area clipping.
 8. If UI polish continues:
    - consider slightly tightening the workspace intro text
    - consider whether diagnostics summary belongs inline with legend/footer copy instead of as its own row
@@ -180,6 +196,7 @@
 - The app currently always compiles with `includeMinorRoads: true` and relies on legend toggles for hiding classes instead of a dedicated “include minor roads” control.
 - Road density is independent of stitch detail. `roadNetworkDetail` defaults to `18`; its selection profile maps density to repeated network-growth rounds.
 - The road curation/rendering pipeline intentionally favors visual continuity and stitchability over geographic fidelity.
+- `continuousLineKind(...)` covers `rail` and `stream`; these kinds bypass `thinLineCandidate(...)` and use whole-candidate duplicate rejection plus same-kind endpoint snapping.
 
 ## Last validated state
 
@@ -197,14 +214,16 @@
   - render interactions were re-checked after the performance pass
   - road-detail slider defaults to `Prominent`
   - boundaries are absent and streams are omitted over water fills
+  - rail and stream candidates are retained whole and snap near-touching same-kind endpoints
   - I-5 and I-90 route probes each produce one centerline feature
   - compact Seattle probes at road detail 18, 55, and 100 produce one rendered road component
 - Build status:
   - `npm run build` passed
-- `git diff --check` passed after the latest road pass.
+- `git diff --check` passed after the latest continuous-line pass.
 
 ## Recent commits
 
+- `646020d` - `Refine road network curation`
 - `0f6dd8b` - `Add double-click zoom and preview attribution`
 - `0283be5` - `Add place search for map navigation`
 - `f1dba48` - `Merge rendering performance improvements`

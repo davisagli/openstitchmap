@@ -1608,7 +1608,7 @@ function buildSelectedRoadCellCounts(
   return counts;
 }
 
-function nearestOtherSelectedRoadCell(
+function nearestOtherSelectedCell(
   endpoint: GridCell,
   selectedCellCounts: Map<string, number>,
   ownCellCounts: Map<string, number>,
@@ -1677,7 +1677,7 @@ function snapSelectedRoadEndpointsToNetwork(
   const startEndpoint = snapToGrid(projected[0]);
 
   const startTarget = endpointCanSnapToNetwork(candidate, startEndpoint, width, height)
-    ? nearestOtherSelectedRoadCell(startEndpoint, selectedCellCounts, ownCellCounts, radius)
+    ? nearestOtherSelectedCell(startEndpoint, selectedCellCounts, ownCellCounts, radius)
     : null;
   if (startTarget) {
     projected[0] = startTarget;
@@ -1687,7 +1687,7 @@ function snapSelectedRoadEndpointsToNetwork(
   const endIndex = projected.length - 1;
   const endEndpoint = snapToGrid(projected[endIndex]);
   const endTarget = endpointCanSnapToNetwork(candidate, endEndpoint, width, height)
-    ? nearestOtherSelectedRoadCell(endEndpoint, selectedCellCounts, ownCellCounts, radius)
+    ? nearestOtherSelectedCell(endEndpoint, selectedCellCounts, ownCellCounts, radius)
     : null;
   if (endTarget) {
     projected[endIndex] = endTarget;
@@ -2141,33 +2141,108 @@ function updateOccupancy(cells: GridCell[], occupied: Map<string, number>, rank:
   }
 }
 
-function shouldKeepContinuousCandidate(
-  candidate: LineCandidate,
-  occupiedLines: Map<string, number>,
-  occupiedRoads: Map<string, number>,
-  graph: SnappedRoadGraph,
-): boolean {
+function shouldKeepContinuousCandidate(candidate: LineCandidate, occupiedKind: Map<string, number>): boolean {
   const cells = flattenUniqueCells(rasterizeProjectedLine(candidate.projected));
   if (!cells.length) {
     return false;
   }
 
-  const nearbyThreshold = candidate.kind === 'primaryRoad' ? candidate.rank - 30 : candidate.rank - 20;
-  const nearbyRoadCoverage = nearbyCoverageRatio(cells, occupiedRoads, nearbyThreshold, 1);
-  const exactLineCoverage = coverageRatio(cells, occupiedLines, candidate.rank);
-  const novelCellCount = countNearbyNovelCells(cells, occupiedRoads, nearbyThreshold, 1);
-  const endpointConnections = endpointConnectionCount(cells, occupiedRoads, nearbyThreshold, 1);
+  const nearbyThreshold = candidate.rank - 20;
+  const nearbyCoverage = nearbyCoverageRatio(cells, occupiedKind, nearbyThreshold, 1);
+  const exactCoverage = coverageRatio(cells, occupiedKind, candidate.rank);
+  const novelCellCount = countNearbyNovelCells(cells, occupiedKind, nearbyThreshold, 1);
   const minimumNovelCells = Math.max(3, Math.floor(cells.length * 0.08));
 
-  if (nearbyRoadCoverage >= 0.92 && novelCellCount <= minimumNovelCells) {
+  if (nearbyCoverage >= 0.94 && novelCellCount <= minimumNovelCells) {
     return false;
   }
 
-  if (exactLineCoverage >= 0.84 && nearbyRoadCoverage >= 0.86 && novelCellCount <= minimumNovelCells + 1) {
+  if (exactCoverage >= 0.84 && nearbyCoverage >= 0.88 && novelCellCount <= minimumNovelCells + 1) {
     return false;
   }
 
-  return novelCellCount >= minimumNovelCells || endpointConnections > 0 || isGraphConnector(candidate, graph);
+  return true;
+}
+
+function continuousLineKind(candidate: LineCandidate): candidate is LineCandidate & { kind: 'rail' | 'stream' } {
+  return candidate.kind === 'rail' || candidate.kind === 'stream';
+}
+
+function selectContinuousLineCandidates(candidates: LineCandidate[]): Set<string> {
+  const selected = new Set<string>();
+  const occupancy = new Map<'rail' | 'stream', Map<string, number>>([
+    ['rail', new Map<string, number>()],
+    ['stream', new Map<string, number>()],
+  ]);
+
+  for (const candidate of candidates) {
+    if (!continuousLineKind(candidate)) {
+      continue;
+    }
+
+    const occupiedKind = occupancy.get(candidate.kind)!;
+    if (!shouldKeepContinuousCandidate(candidate, occupiedKind)) {
+      continue;
+    }
+
+    selected.add(candidate.id);
+    updateOccupancy(flattenUniqueCells(rasterizeProjectedLine(candidate.projected)), occupiedKind, candidate.rank);
+  }
+
+  return selected;
+}
+
+function buildContinuousLineCellCounts(
+  candidates: LineCandidate[],
+  selectedIds: Set<string>,
+): Map<'rail' | 'stream', Map<string, number>> {
+  const counts = new Map<'rail' | 'stream', Map<string, number>>([
+    ['rail', new Map<string, number>()],
+    ['stream', new Map<string, number>()],
+  ]);
+
+  for (const candidate of candidates) {
+    if (!selectedIds.has(candidate.id) || !continuousLineKind(candidate)) {
+      continue;
+    }
+    incrementCellCounts(flattenUniqueCells(rasterizeProjectedLine(candidate.projected)), counts.get(candidate.kind)!);
+  }
+
+  return counts;
+}
+
+function snapContinuousLineEndpoints(
+  candidate: LineCandidate & { kind: 'rail' | 'stream' },
+  selectedCellCounts: Map<string, number>,
+  bbox: BBox,
+  width: number,
+  height: number,
+): Pick<LineCandidate, 'coordinates' | 'projected'> {
+  const projected = candidate.projected.map((point) => ({ ...point }));
+  const ownCellCounts = new Map<string, number>();
+  incrementCellCounts(flattenUniqueCells(rasterizeProjectedLine(projected)), ownCellCounts);
+  const radius = candidate.kind === 'rail' ? 2 : 1.5;
+  let changed = false;
+
+  for (const index of [0, projected.length - 1]) {
+    const endpoint = snapToGrid(projected[index]);
+    const isViewportEdge = endpoint.x <= 1 || endpoint.x >= width - 1 || endpoint.y <= 1 || endpoint.y >= height - 1;
+    if (isViewportEdge) {
+      continue;
+    }
+    const target = nearestOtherSelectedCell(endpoint, selectedCellCounts, ownCellCounts, radius);
+    if (target) {
+      projected[index] = target;
+      changed = true;
+    }
+  }
+
+  return changed
+    ? {
+        coordinates: projected.map((point) => unprojectFromGrid(point, bbox, width, height)),
+        projected,
+      }
+    : { coordinates: candidate.coordinates, projected: candidate.projected };
 }
 
 function thinLineCandidate(
@@ -2427,6 +2502,12 @@ export function curateFeatures(
     return right.length - left.length;
   });
 
+  const selectedContinuousLineIds = selectContinuousLineCandidates(collapsedLineCandidates);
+  const continuousLineCellCounts = buildContinuousLineCellCounts(
+    collapsedLineCandidates,
+    selectedContinuousLineIds,
+  );
+
   const occupiedLines = new Map<string, number>();
   const occupiedRoads = new Map<string, number>();
   const selectedRoadCellCounts = buildSelectedRoadCellCounts(
@@ -2469,17 +2550,24 @@ export function curateFeatures(
       continue;
     }
 
-    if (candidate.kind === 'rail') {
-      if (!shouldKeepContinuousCandidate(candidate, occupiedLines, occupiedRoads, roadGraph)) {
+    if (continuousLineKind(candidate)) {
+      if (!selectedContinuousLineIds.has(candidate.id)) {
         stats.droppedOverlappingLines += 1;
         continue;
       }
 
-      const keptCells = rasterizeProjectedLine(candidate.projected);
+      const snapped = snapContinuousLineEndpoints(
+        candidate,
+        continuousLineCellCounts.get(candidate.kind)!,
+        options.bbox,
+        options.width,
+        options.height,
+      );
+      const keptCells = rasterizeProjectedLine(snapped.projected);
       curated.push({
         ...candidate.feature,
         id: `${candidate.id}:continuous`,
-        coordinates: candidate.coordinates,
+        coordinates: snapped.coordinates,
       });
       stats.linesKept += 1;
 
