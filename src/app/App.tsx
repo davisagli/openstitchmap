@@ -3,7 +3,6 @@ import type {
   FormEvent as ReactFormEvent,
   MouseEvent as ReactMouseEvent,
   PointerEvent as ReactPointerEvent,
-  WheelEvent as ReactWheelEvent,
 } from 'react';
 import './App.css';
 import type { BBox, MapFeature, Position } from '../core/osm';
@@ -40,6 +39,11 @@ interface PreviewMotion {
   scale: number;
   translateX: number;
   translateY: number;
+}
+
+interface WheelZoomFeedback {
+  baseMotion: PreviewMotion | null;
+  direction: 1 | -1;
 }
 
 interface Settings {
@@ -91,11 +95,13 @@ const HOSTED_TILEJSON_URL = 'https://tiles.openfreemap.org/planet';
 const defaultAreaPreset = areaPresets[0];
 const SLIPPY_VIEW_HEIGHT_TILES = 1;
 const PREVIEW_OVERSCAN_FACTOR = 1.45;
-const PREVIEW_PADDING = 24;
 const FABRIC_COUNTS: FabricCount[] = [14, 16, 18];
 const NOMINATIM_SEARCH_URL = 'https://nominatim.openstreetmap.org/search';
 const HOSTED_SOURCE_MAX_ZOOM = 14;
 const ROAD_SOURCE_ZOOM_OFFSETS = [2, 1, 0] as const;
+const WHEEL_ZOOM_THRESHOLD = 180;
+const WHEEL_ZOOM_IDLE_COMMIT_THRESHOLD = 48;
+const WHEEL_ZOOM_FEEDBACK_MAX_SCALE = 0.16;
 
 const defaultSettings: Settings = {
   center: defaultAreaPreset.center,
@@ -118,6 +124,46 @@ function clampDimension(value: number, fallback: number): number {
 
 function inches(stitches: number, fabricCount: number): string {
   return (stitches / fabricCount).toFixed(1);
+}
+
+function centimeters(stitches: number, fabricCount: number): string {
+  return ((stitches / fabricCount) * 2.54).toFixed(1);
+}
+
+function stitchedSizeLabel(stitches: number, fabricCount: number): string {
+  return `${inches(stitches, fabricCount)} in / ${centimeters(stitches, fabricCount)} cm`;
+}
+
+function formatLegendUsage(usage: number): string {
+  return Math.round(usage).toLocaleString();
+}
+
+function snappedPreviewOffset(previewStitches: number, patternStitches: number, cellSize: number): number {
+  return -Math.max(0, Math.round((previewStitches - patternStitches) / 2)) * cellSize;
+}
+
+function defaultPreviewMotion(): PreviewMotion {
+  return {
+    scale: 1,
+    translateX: 0,
+    translateY: 0,
+  };
+}
+
+function zoomPreviewMotion(
+  baseMotion: PreviewMotion | null,
+  anchorX: number,
+  anchorY: number,
+  baseOffsetX: number,
+  baseOffsetY: number,
+  zoomFactor: number,
+): PreviewMotion {
+  const motion = baseMotion ?? defaultPreviewMotion();
+  return {
+    scale: motion.scale * zoomFactor,
+    translateX: (1 - zoomFactor) * (anchorX - baseOffsetX) + zoomFactor * motion.translateX,
+    translateY: (1 - zoomFactor) * (anchorY - baseOffsetY) + zoomFactor * motion.translateY,
+  };
 }
 
 function clampZoom(value: number): number {
@@ -410,7 +456,9 @@ function normalizeSearchResult(value: unknown): SearchResult | null {
 
 export function App() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const previewFrameRef = useRef<HTMLElement | null>(null);
   const previewViewportRef = useRef<HTMLDivElement | null>(null);
+  const searchFormRef = useRef<HTMLFormElement | null>(null);
   const searchAbortRef = useRef<AbortController | null>(null);
   const dragRef = useRef<{
     pointerId: number;
@@ -418,6 +466,9 @@ export function App() {
     startX: number;
     startY: number;
   } | null>(null);
+  const wheelZoomDeltaRef = useRef(0);
+  const wheelZoomFeedbackRef = useRef<WheelZoomFeedback | null>(null);
+  const wheelZoomFeedbackResetRef = useRef<number | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>('chart');
   const [isDraggingPreview, setIsDraggingPreview] = useState(false);
   const [previewMotion, setPreviewMotion] = useState<PreviewMotion | null>(null);
@@ -538,7 +589,6 @@ export function App() {
         detailLevel: deferredSettings.detailLevel,
         includeMinorRoads: true,
         roadNetworkDetail: deferredSettings.roadNetworkDetail,
-        roadNetworkMode: 'sourceZoom',
       }),
       options: {
         title: `${sourceData.title} Pattern`,
@@ -546,7 +596,6 @@ export function App() {
         height: deferredSettings.height,
         bbox: currentViewportBBox,
         includeMinorRoads: true,
-        pruneDisconnectedRoads: false,
       },
     };
     const preview = {
@@ -557,7 +606,6 @@ export function App() {
         detailLevel: deferredSettings.detailLevel,
         includeMinorRoads: true,
         roadNetworkDetail: deferredSettings.roadNetworkDetail,
-        roadNetworkMode: 'sourceZoom',
       }),
       options: {
         title: `${sourceData.title} Preview`,
@@ -565,7 +613,6 @@ export function App() {
         height: previewHeight,
         bbox: previewViewportBBox,
         includeMinorRoads: true,
-        pruneDisconnectedRoads: false,
       },
     };
 
@@ -676,13 +723,52 @@ export function App() {
 
   useEffect(() => () => {
     searchAbortRef.current?.abort();
+    if (wheelZoomFeedbackResetRef.current !== null) {
+      window.clearTimeout(wheelZoomFeedbackResetRef.current);
+    }
   }, []);
+
+  useEffect(() => {
+    const frame = previewFrameRef.current;
+    if (!frame) {
+      return undefined;
+    }
+
+    const handleWheel = (event: WheelEvent) => handlePreviewWheel(event);
+    frame.addEventListener('wheel', handleWheel, { passive: false });
+    return () => frame.removeEventListener('wheel', handleWheel);
+  });
+
+  useEffect(() => {
+    function closeSearchResults(event: PointerEvent) {
+      if (!searchResults.length) {
+        return;
+      }
+
+      const target = event.target;
+      if (target instanceof Node && searchFormRef.current?.contains(target)) {
+        return;
+      }
+
+      setSearchResults([]);
+    }
+
+    document.addEventListener('pointerdown', closeSearchResults);
+    return () => document.removeEventListener('pointerdown', closeSearchResults);
+  }, [searchResults.length]);
 
   function updateSettings<K extends keyof Settings>(key: K, value: Settings[K]) {
     setSettings((current) => ({
       ...current,
       [key]: value,
     }));
+  }
+
+  function clearWheelFeedbackReset() {
+    if (wheelZoomFeedbackResetRef.current !== null) {
+      window.clearTimeout(wheelZoomFeedbackResetRef.current);
+      wheelZoomFeedbackResetRef.current = null;
+    }
   }
 
   function jumpToSearchResult(result: SearchResult) {
@@ -694,6 +780,10 @@ export function App() {
       },
       zoomHint: searchBBoxToZoom(result.bbox, current.width, current.height, current.zoomHint),
     }));
+    setSearchQuery(result.label);
+    setSearchResults([]);
+    setSearchError(null);
+    setSearchStatus('idle');
     setPreviewMotion(null);
   }
 
@@ -849,19 +939,92 @@ export function App() {
       : startMotion);
   }
 
-  function handlePreviewWheel(event: ReactWheelEvent<HTMLElement>) {
+  function handlePreviewWheel(event: WheelEvent) {
     const viewport = previewViewportRef.current;
     if (!viewport) {
       return;
     }
 
     event.preventDefault();
+    event.stopPropagation();
 
+    const normalizedDeltaY =
+      event.deltaMode === WheelEvent.DOM_DELTA_LINE
+        ? event.deltaY * 16
+        : event.deltaMode === WheelEvent.DOM_DELTA_PAGE
+          ? event.deltaY * viewport.clientHeight
+          : event.deltaY;
+    wheelZoomDeltaRef.current += normalizedDeltaY;
     const rect = viewport.getBoundingClientRect();
-    applyPreviewZoom(event.clientX - rect.left, event.clientY - rect.top, event.deltaY < 0 ? 1 : -1);
+    const anchorX = event.clientX - rect.left;
+    const anchorY = event.clientY - rect.top;
+    const direction = wheelZoomDeltaRef.current < 0 ? 1 : -1;
+    const canCommitZoom = clampZoom(settings.zoomHint + direction) !== settings.zoomHint;
+    if (!canCommitZoom) {
+      const feedback = wheelZoomFeedbackRef.current;
+      clearWheelFeedbackReset();
+      wheelZoomFeedbackRef.current = null;
+      wheelZoomDeltaRef.current = 0;
+      setPreviewMotion(feedback?.baseMotion ?? null);
+      return;
+    }
+
+    if (Math.abs(wheelZoomDeltaRef.current) < WHEEL_ZOOM_THRESHOLD) {
+      if (!wheelZoomFeedbackRef.current || wheelZoomFeedbackRef.current.direction !== direction) {
+        wheelZoomFeedbackRef.current = {
+          baseMotion: previewMotion,
+          direction,
+        };
+      }
+
+      const progress = Math.min(0.96, Math.abs(wheelZoomDeltaRef.current) / WHEEL_ZOOM_THRESHOLD);
+      const zoomFactor =
+        direction > 0
+          ? 1 + progress * WHEEL_ZOOM_FEEDBACK_MAX_SCALE
+          : 1 / (1 + progress * WHEEL_ZOOM_FEEDBACK_MAX_SCALE);
+      setPreviewMotion(
+        zoomPreviewMotion(
+          wheelZoomFeedbackRef.current.baseMotion,
+          anchorX,
+          anchorY,
+          previewBaseOffsetX,
+          previewBaseOffsetY,
+          zoomFactor,
+        ),
+      );
+
+      clearWheelFeedbackReset();
+      wheelZoomFeedbackResetRef.current = window.setTimeout(() => {
+        const feedback = wheelZoomFeedbackRef.current;
+        const accumulatedDelta = wheelZoomDeltaRef.current;
+        wheelZoomFeedbackRef.current = null;
+        wheelZoomDeltaRef.current = 0;
+        wheelZoomFeedbackResetRef.current = null;
+
+        if (feedback && Math.abs(accumulatedDelta) >= WHEEL_ZOOM_IDLE_COMMIT_THRESHOLD) {
+          applyPreviewZoom(anchorX, anchorY, feedback.direction, feedback.baseMotion);
+        } else {
+          setPreviewMotion(feedback?.baseMotion ?? null);
+        }
+      }, 220);
+      return;
+    }
+
+    const feedbackBaseMotion = wheelZoomFeedbackRef.current?.baseMotion ?? previewMotion;
+    const zoomDelta = direction;
+    wheelZoomDeltaRef.current = 0;
+    wheelZoomFeedbackRef.current = null;
+    clearWheelFeedbackReset();
+
+    applyPreviewZoom(anchorX, anchorY, zoomDelta, feedbackBaseMotion);
   }
 
-  function applyPreviewZoom(anchorX: number, anchorY: number, zoomDelta: number) {
+  function applyPreviewZoom(
+    anchorX: number,
+    anchorY: number,
+    zoomDelta: number,
+    baseMotionOverride: PreviewMotion | null | undefined = undefined,
+  ) {
     const viewport = previewViewportRef.current;
     if (!viewport) {
       return;
@@ -872,6 +1035,9 @@ export function App() {
     const normalizedY = anchorY / Math.max(1, rect.height);
     const nextZoom = clampZoom(settings.zoomHint + zoomDelta);
     if (nextZoom === settings.zoomHint) {
+      if (baseMotionOverride !== undefined) {
+        setPreviewMotion(baseMotionOverride);
+      }
       return;
     }
 
@@ -908,19 +1074,8 @@ export function App() {
 
     const zoomFactor = 2 ** zoomDelta;
     setPreviewMotion((currentPreviewMotion) => {
-      const currentMotion = currentPreviewMotion ?? {
-        scale: 1,
-        translateX: 0,
-        translateY: 0,
-      };
-
-      return {
-        scale: currentMotion.scale * zoomFactor,
-        translateX:
-          (1 - zoomFactor) * (anchorX - previewBaseOffsetX) + zoomFactor * currentMotion.translateX,
-        translateY:
-          (1 - zoomFactor) * (anchorY - previewBaseOffsetY) + zoomFactor * currentMotion.translateY,
-      };
+      const baseMotion = baseMotionOverride === undefined ? currentPreviewMotion : baseMotionOverride;
+      return zoomPreviewMotion(baseMotion, anchorX, anchorY, previewBaseOffsetX, previewBaseOffsetY, zoomFactor);
     });
   }
 
@@ -976,14 +1131,14 @@ export function App() {
   const previewViewportStyle =
     pattern && previewPattern
       ? {
-          width: pattern.width * cellSize + PREVIEW_PADDING * 2,
-          height: pattern.height * cellSize + PREVIEW_PADDING * 2,
+          width: pattern.width * cellSize,
+          height: pattern.height * cellSize,
         }
       : undefined;
   const previewBaseOffsetX =
-    pattern && previewPattern ? -((previewPattern.width - pattern.width) * cellSize) / 2 : 0;
+    pattern && previewPattern ? snappedPreviewOffset(previewPattern.width, pattern.width, cellSize) : 0;
   const previewBaseOffsetY =
-    pattern && previewPattern ? -((previewPattern.height - pattern.height) * cellSize) / 2 : 0;
+    pattern && previewPattern ? snappedPreviewOffset(previewPattern.height, pattern.height, cellSize) : 0;
   const previewCanvasStyle =
     pattern && previewPattern
       ? {
@@ -993,6 +1148,9 @@ export function App() {
           transformOrigin: '0 0',
         }
       : undefined;
+  const isRenderingPreview = isRefreshingPreview || isPending;
+  const stitchedWidth = stitchedSizeLabel(settings.width, settings.fabricCount);
+  const stitchedHeight = stitchedSizeLabel(settings.height, settings.fabricCount);
 
   return (
     <div className="app-shell">
@@ -1040,20 +1198,6 @@ export function App() {
               </div>
             </div>
 
-            <div>
-              <div className="stats-title">Stitched size</div>
-              <div className="stats-grid">
-                <div className="stat-tile">
-                  <div className="stat-value">{inches(settings.width, settings.fabricCount)} in</div>
-                  <div className="stat-label">Width on {settings.fabricCount}-count fabric</div>
-                </div>
-                <div className="stat-tile">
-                  <div className="stat-value">{inches(settings.height, settings.fabricCount)} in</div>
-                  <div className="stat-label">Height on {settings.fabricCount}-count fabric</div>
-                </div>
-              </div>
-            </div>
-
             <fieldset className="control-row radio-fieldset">
               <legend>Fabric count</legend>
               <div className="radio-group">
@@ -1071,6 +1215,20 @@ export function App() {
                 ))}
               </div>
             </fieldset>
+
+            <div className="stitched-size">
+              <div className="stats-title">Stitched size</div>
+              <div className="stats-grid">
+                <div className="stat-tile">
+                  <div className="stat-value">{stitchedWidth}</div>
+                  <div className="stat-label">Width</div>
+                </div>
+                <div className="stat-tile">
+                  <div className="stat-value">{stitchedHeight}</div>
+                  <div className="stat-label">Height</div>
+                </div>
+              </div>
+            </div>
           </div>
         </section>
 
@@ -1150,7 +1308,11 @@ export function App() {
             legend below to hide individual areas, ways, or POIs from the stitched map.
           </p>
 
-          <form className="location-search workspace-search" onSubmit={handleLocationSearch}>
+          <form
+            className="location-search workspace-search"
+            ref={searchFormRef}
+            onSubmit={handleLocationSearch}
+          >
             <div className="search-row">
               <input
                 className="input"
@@ -1186,9 +1348,9 @@ export function App() {
         </div>
 
         <section
-          className="preview-frame interactive"
+          className={`preview-frame interactive ${isRenderingPreview ? 'rendering' : ''}`}
           aria-label="Pattern preview"
-          onWheel={handlePreviewWheel}
+          ref={previewFrameRef}
         >
           <div className="preview-center">
             {sourceError ? (
@@ -1244,7 +1406,7 @@ export function App() {
                   <span>{entry.floss}</span>
                 </div>
                 <div className="legend-usage">
-                  <strong>{entry.usage}</strong>
+                  <strong>{formatLegendUsage(entry.usage)}</strong>
                   {hiddenLegendEntries.has(legendEntryKey(entry)) ? <span>Hidden</span> : null}
                 </div>
               </button>

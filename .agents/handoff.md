@@ -27,13 +27,14 @@
   pattern does not move when toggling modes.
 - The preview now behaves like a slippy map:
   - drag to pan
-  - mouse-wheel zoom
+  - mouse-wheel zoom uses a non-passive wheel listener, temporary cursor-anchored scale feedback, and an idle commit threshold so it feels responsive without zooming on every tiny wheel event
   - zoom anchors under the cursor
   - preview uses an overscanned canvas clipped by a viewport
+  - the visible preview viewport is exactly the configured pattern width/height in cells, with the overscan canvas offset snapped to whole-cell boundaries so edge cells are not clipped mid-cell
   - transient CSS translate/scale is used during rerenders so pan/zoom does not snap back immediately
 - The sidebar currently exposes only:
   - pattern width / height
-  - stitched size
+  - stitched size, shown quietly in inches and centimeters under fabric count
   - fabric count
   - road detail (`Low` / `Medium` / `High`)
   - preview mode (`chart` / `stitched`)
@@ -41,6 +42,7 @@
 - The legend is now the primary feature-filter UI:
   - single container, ordered as fills first, then ways, then POIs
   - each legend card is a toggle button
+  - usage counts are rounded for display, and legend columns are wide enough to avoid count overflow
   - line and marker toggles now reuse compiled overlays instead of re-running the full pipeline
   - fill toggles still rebuild cells, but no longer re-run curation or overlay compilation
 - Source diagnostics live at the bottom in a collapsed `<details>` section with a short summary line.
@@ -54,11 +56,12 @@
 - `src/app/App.tsx`
   - Main UI and data-loading flow.
   - Implements slippy-map pan/zoom behavior.
+  - Handles search result dropdowns, outside-click dismissal, exact preview viewport sizing, and temporary wheel-zoom feedback.
   - Splits expensive work into prepared viewport data, compiled base assets, and visible pattern derivation.
   - Line/marker legend toggles now filter cached overlays; fill toggles recompile cells only.
 - `src/core/pattern/curateFeatures.ts`
   - Main stitch-aware filtering / simplification pass.
-  - Contains polygon filtering, marker budgeting, line thinning, snapped road graph logic, graph-role heuristics, and primary-corridor collapse.
+  - Contains polygon filtering, marker budgeting, line thinning, snapped road graph logic, and parallel-corridor collapse.
 - `src/core/pattern/compilePattern.ts`
   - Compiles curated features into pattern cells / backstitch / markers.
   - Polygon fill compilation now operates in projected grid space with a cell-local polygon index.
@@ -66,6 +69,7 @@
   - Also contains backstitch path snapping + simplification.
   - Contains the conservative 3/4-stitch eligibility pass for polygon fills.
   - Backstitch smoothing is no longer user-configurable; the previous balanced behavior is now the fixed behavior.
+  - The old compile-time single-component road backstitch prune was removed.
 - `src/core/tiles/vectorTileDecoder.ts`
   - Shared vector tile normalization.
   - Important for layer/tag normalization, especially transportation classes.
@@ -93,10 +97,9 @@
 - Parallel road/rail corridors are collapsed before rendering, but the current collapse no longer averages geometry into a new centerline. It keeps the anchor source geometry, drops overlapping duplicate segments, and preserves non-overlapping connector stubs when they span rendered grid cells.
 - `*_link` roads participate in parallel-corridor matching so freeway ramps/links can be considered part of a corridor while their useful connector tails survive as stubs.
 - The parallel-corridor matcher uses a spatial index of accepted anchors plus cached rasterized cells/occupancy maps to avoid broad pairwise raster checks at high road detail.
-- Route-centerline extraction was removed from the active pipeline because it did little in practice and could create unstable geometry.
-- In source-zoom mode, all remaining road-like candidates are selected after collapse; the old graph-growth selector remains available for non-source-zoom mode.
-- Source-zoom road rendering disables the final single-component road prune so legitimate tile-selected road pieces are not discarded solely for being disconnected.
-- Selected road geometry is still endpoint-snapped before compilation. Route endpoints on the viewport edge are not pulled inward.
+- Route-centerline extraction and the old graph-growth selector were removed because source-zoom roads are now the only active road selection path.
+- All remaining road-like candidates are selected after parallel-corridor collapse; there is no final single-component road prune.
+- Selected road geometry is still endpoint-snapped before compilation.
 - Compile-time Douglas-Peucker simplification remains enabled for roads so long diagonals do not become blocky staircases.
 
 ## Continuous rail and stream approach
@@ -116,6 +119,7 @@
 - The stitched preview reads more like a finished physical product through fabric texture,
   dimensional floss, softer cross-stitch shadows, and restrained stitch irregularity.
 - Switching between chart and stitched modes no longer changes the preview dimensions.
+- The visible preview viewport now matches the configured pattern dimensions exactly, with a diagonal-bar panel around it.
 - Multi-lane overlap is reduced compared with the early raw-vector passes.
 - Road detail now changes the source zoom for road-like layers instead of expanding a manually curated graph budget.
 - Sidewalk-like paths are more aggressively suppressed when they shadow stronger roads.
@@ -135,6 +139,7 @@
   - way swatches resemble angled backstitch segments
   - POI swatches resemble French knots
   - marker legend entries show DMC floss codes instead of the text `French knot`
+- Search results appear as a dropdown, close on outside click, and disappear after selecting a result.
 
 ## What still looks rough
 
@@ -146,6 +151,7 @@
 - There is no dedicated diagnostics UI yet for why a specific road survived, collapsed, or was excluded.
 - The workspace intro copy still says “Use the grouped legend below…” even though the explicit subgroup headings were removed. That copy is functionally fine but could be tightened.
 - The slippy map still works on a stitch-grid abstraction, not true continuous cartographic rendering, so motion can feel a little approximate when rerenders are fast/slow.
+- Wheel zoom has temporary canvas feedback and an idle commit path, but it is still a custom interaction that should be tested across mouse wheels and trackpads.
 - The realistic fabric/floss treatment is still experimental and may need tuning across
   palettes, pattern dimensions, and display pixel densities.
 - `chart -> stitched` is still noticeably slower than the reverse direction, so the draw path is now the next obvious bottleneck.
@@ -160,7 +166,7 @@
    - consider whether different fill classes should allow different fractional-stitch aggressiveness
 3. Add road diagnostics that explain source zoom, parallel-collapse matches/stubs, endpoint snapping, and final rendered segments.
 4. Continue profiling high road detail if interaction still feels slow; next likely targets are compile-time backstitch simplification and preview drawing.
-5. Revisit whether the final single-component backstitch prune should remain disabled for source-zoom roads or become a more nuanced multi-component filter.
+5. If road clutter returns, consider a nuanced multi-component road filter rather than restoring the old single-component prune.
 7. Add focused rail/stream continuity diagnostics or fixtures, especially for fragmented tile-source geometry and water-area clipping.
 8. If UI polish continues:
    - consider slightly tightening the workspace intro text
@@ -195,6 +201,7 @@
 - Stitch detail is hidden in the UI and defaults to `high`.
 - Road density is independent of stitch detail. `roadNetworkDetail` is a 0/1/2 slider for Low/Medium/High road source zoom offsets.
 - The road curation/rendering pipeline intentionally favors visual continuity and stitchability over geographic fidelity.
+- The old road `roadNetworkMode` option, graph-growth budget selector, route-centerline special cases, and compile-time disconnected-road prune were removed in the cleanup pass.
 - `continuousLineKind(...)` covers `rail` and `stream`; these kinds bypass `thinLineCandidate(...)` and use whole-candidate duplicate rejection plus same-kind endpoint snapping.
 
 ## Last validated state
@@ -204,7 +211,9 @@
   - OpenFreeMap Seattle waterfront default
   - stitch detail hidden in the UI and defaulted to high
   - preview mode: chart and stitched
-  - both preview modes use the same canvas and clipped viewport dimensions
+  - both preview modes use the same canvas and exact clipped viewport dimensions
+  - preview panel has diagonal bars around the exact clipped pattern viewport
+  - wheel zoom prevents page scroll over the preview, gives temporary scale feedback, commits on idle or threshold, and clamps feedback at the real min/max zoom
   - stitched mode uses the realistic woven-fabric/floss treatment
   - conservative 3/4 stitches appear only where neighboring cells corroborate the smoothed edge
   - legend order: fills, then ways, then POIs
@@ -218,10 +227,11 @@
   - parallel-corridor collapse keeps anchor geometry and preserves rendered connector stubs
 - Build status:
   - `npm run build` passed
-- `git diff --check` passed after the latest source-zoom road pass.
+- `git diff --check` passed after the latest cleanup/UI interaction pass.
 
 ## Recent commits
 
+- `2bdaab4` - `Use source zoom for road detail`
 - `646020d` - `Refine road network curation`
 - `0f6dd8b` - `Add double-click zoom and preview attribution`
 - `0283be5` - `Add place search for map navigation`
