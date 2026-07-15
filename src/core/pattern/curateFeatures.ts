@@ -10,6 +10,7 @@ export interface CurateFeaturesOptions {
   detailLevel: DetailLevel;
   includeMinorRoads: boolean;
   roadNetworkDetail: number;
+  roadNetworkMode?: 'graph' | 'sourceZoom';
 }
 
 export interface CurateFeaturesStats {
@@ -170,13 +171,6 @@ function lineLength(points: GridPoint[]): number {
     total += distance(points[index - 1], points[index]);
   }
   return total;
-}
-
-function interpolatePoint(left: GridPoint, right: GridPoint, ratio: number): GridPoint {
-  return {
-    x: left.x + (right.x - left.x) * ratio,
-    y: left.y + (right.y - left.y) * ratio,
-  };
 }
 
 function perpendicularDistance(point: GridPoint, start: GridPoint, end: GridPoint): number {
@@ -876,164 +870,138 @@ function lineHeadingSimilarity(left: GridPoint[], right: GridPoint[]): number {
   return dot(normalizedLeft, normalizedRight);
 }
 
-function orientProjectedLike(reference: GridPoint[], candidate: GridPoint[]): GridPoint[] {
-  if (lineHeadingSimilarity(reference, candidate) < 0) {
-    return [...candidate].reverse();
+function uniqueCellsForCandidate(
+  candidate: LineCandidate,
+  candidateCells: Map<string, GridCell[]>,
+  uniqueCellCache: Map<string, GridCell[]>,
+): GridCell[] {
+  const cached = uniqueCellCache.get(candidate.id);
+  if (cached) {
+    return cached;
   }
 
-  return candidate;
+  const cells = candidateCells.get(candidate.id) ?? flattenCellPath(rasterizeProjectedLine(candidate.projected));
+  const unique = Array.from(new Map(cells.map((cell) => [cellKey(cell), cell])).values());
+  uniqueCellCache.set(candidate.id, unique);
+  return unique;
 }
 
-function resampleProjectedLine(projected: GridPoint[], sampleCount: number): GridPoint[] {
-  if (projected.length <= 1 || sampleCount <= 1) {
-    return projected.slice(0, sampleCount);
+function occupancyForCandidate(
+  candidate: LineCandidate,
+  candidateCells: Map<string, GridCell[]>,
+  uniqueCellCache: Map<string, GridCell[]>,
+  occupancyCache: Map<string, Map<string, number>>,
+): Map<string, number> {
+  const cached = occupancyCache.get(candidate.id);
+  if (cached) {
+    return cached;
   }
 
-  const distances = [0];
-  for (let index = 1; index < projected.length; index += 1) {
-    distances.push(distances[index - 1] + distance(projected[index - 1], projected[index]));
-  }
-
-  const totalLength = distances[distances.length - 1];
-  if (totalLength === 0) {
-    return Array.from({ length: sampleCount }, () => projected[0]);
-  }
-
-  const samples: GridPoint[] = [];
-  let segmentIndex = 1;
-
-  for (let sampleIndex = 0; sampleIndex < sampleCount; sampleIndex += 1) {
-    const targetDistance = (sampleIndex / (sampleCount - 1)) * totalLength;
-
-    while (segmentIndex < distances.length - 1 && distances[segmentIndex] < targetDistance) {
-      segmentIndex += 1;
-    }
-
-    const startIndex = Math.max(0, segmentIndex - 1);
-    const endIndex = Math.min(projected.length - 1, segmentIndex);
-    const startDistance = distances[startIndex];
-    const endDistance = distances[endIndex];
-    const ratio = endDistance === startDistance ? 0 : (targetDistance - startDistance) / (endDistance - startDistance);
-    samples.push(interpolatePoint(projected[startIndex], projected[endIndex], ratio));
-  }
-
-  return samples;
+  const occupied = new Map<string, number>();
+  updateOccupancy(uniqueCellsForCandidate(candidate, candidateCells, uniqueCellCache), occupied, candidate.rank);
+  occupancyCache.set(candidate.id, occupied);
+  return occupied;
 }
 
-function averageProjectedLines(lines: GridPoint[][], sampleCount: number): GridPoint[] {
-  const resampled = lines.map((line) => resampleProjectedLine(line, sampleCount));
-  return Array.from({ length: sampleCount }, (_, index) => {
-    const total = resampled.reduce(
-      (accumulator, line) => ({
-        x: accumulator.x + line[index].x,
-        y: accumulator.y + line[index].y,
-      }),
-      { x: 0, y: 0 },
-    );
-
-    return {
-      x: total.x / resampled.length,
-      y: total.y / resampled.length,
-    };
-  });
+function nearbyCoverageRatioForOccupiedCells(
+  cells: GridCell[],
+  occupied: Map<string, number>,
+  minimumRank: number,
+  radius: number,
+): number {
+  return nearbyCoverageRatio(cells, occupied, minimumRank, radius);
 }
 
-function representativeRouteCenterline(lines: GridPoint[][]): GridPoint[] | null {
-  const usableLines = lines.filter((line) => line.length >= 2 && lineLength(line) > 0);
-  if (!usableLines.length) {
-    return null;
-  }
-
-  const reference = usableLines.reduce((longest, line) => (lineLength(line) > lineLength(longest) ? line : longest), usableLines[0]);
-  const direction = normalizeVector(headingVector(reference));
-  if (direction.x === 0 && direction.y === 0) {
-    return null;
-  }
-
-  const normal = { x: -direction.y, y: direction.x };
-  const origin = reference[0];
-  const samples = usableLines.flatMap((line) => {
-    const sampleCount = Math.round(clamp(lineLength(line) * 1.25, 4, 96));
-    return resampleProjectedLine(orientProjectedLike(reference, line), sampleCount).map((point) => ({
-      t: dot({ x: point.x - origin.x, y: point.y - origin.y }, direction),
-      n: dot({ x: point.x - origin.x, y: point.y - origin.y }, normal),
-    }));
-  });
-
-  if (samples.length < 2) {
-    return null;
-  }
-
-  const minT = Math.min(...samples.map((sample) => sample.t));
-  const maxT = Math.max(...samples.map((sample) => sample.t));
-  const span = maxT - minT;
-  if (span <= 0) {
-    return null;
-  }
-
-  const sampleCount = Math.round(clamp(span * 1.2, 8, 120));
-  const step = span / Math.max(1, sampleCount - 1);
-  const centerline = Array.from({ length: sampleCount }, (_, index) => {
-    const t = minT + step * index;
-    const window = Math.max(1.5, step * 1.35);
-    let nearby = samples.filter((sample) => Math.abs(sample.t - t) <= window);
-
-    if (!nearby.length) {
-      nearby = [...samples]
-        .sort((left, right) => Math.abs(left.t - t) - Math.abs(right.t - t))
-        .slice(0, 4);
-    }
-
-    const total = nearby.reduce(
-      (accumulator, sample) => ({
-        weight: accumulator.weight + 1,
-        n: accumulator.n + sample.n,
-      }),
-      { weight: 0, n: 0 },
-    );
-    const n = total.weight === 0 ? 0 : total.n / total.weight;
-
-    return {
-      x: origin.x + direction.x * t + normal.x * n,
-      y: origin.y + direction.y * t + normal.y * n,
-    };
-  });
-
-  return dedupeProjectedPoints(centerline);
-}
-
-function dedupeProjectedPoints(points: GridPoint[]): GridPoint[] {
-  if (!points.length) {
-    return points;
-  }
-
-  const deduped = [points[0]];
-  for (let index = 1; index < points.length; index += 1) {
-    const previous = deduped[deduped.length - 1];
-    const current = points[index];
-    if (distance(previous, current) >= 0.35) {
-      deduped.push(current);
-    }
-  }
-
-  return deduped;
-}
-
-function corridorSimilarity(left: LineCandidate, right: LineCandidate, radius = 1): number {
-  const leftCells = flattenUniqueCells(rasterizeProjectedLine(left.projected));
-  const rightCells = flattenUniqueCells(rasterizeProjectedLine(right.projected));
+function cachedCorridorSimilarity(
+  left: LineCandidate,
+  right: LineCandidate,
+  candidateCells: Map<string, GridCell[]>,
+  uniqueCellCache: Map<string, GridCell[]>,
+  occupancyCache: Map<string, Map<string, number>>,
+  radius = 1,
+): number {
+  const leftCells = uniqueCellsForCandidate(left, candidateCells, uniqueCellCache);
+  const rightCells = uniqueCellsForCandidate(right, candidateCells, uniqueCellCache);
   if (!leftCells.length || !rightCells.length) {
     return 0;
   }
 
-  const rightOccupied = new Map<string, number>();
-  const leftOccupied = new Map<string, number>();
-  updateOccupancy(rightCells, rightOccupied, right.rank);
-  updateOccupancy(leftCells, leftOccupied, left.rank);
-
-  const leftCoverage = nearbyCoverageRatio(leftCells, rightOccupied, right.rank - 40, radius);
-  const rightCoverage = nearbyCoverageRatio(rightCells, leftOccupied, left.rank - 40, radius);
+  const leftCoverage = nearbyCoverageRatioForOccupiedCells(
+    leftCells,
+    occupancyForCandidate(right, candidateCells, uniqueCellCache, occupancyCache),
+    right.rank - 40,
+    radius,
+  );
+  const rightCoverage = nearbyCoverageRatioForOccupiedCells(
+    rightCells,
+    occupancyForCandidate(left, candidateCells, uniqueCellCache, occupancyCache),
+    left.rank - 40,
+    radius,
+  );
   return Math.min(leftCoverage, rightCoverage);
+}
+
+function cachedCorridorCoverageRatio(
+  candidate: LineCandidate,
+  anchor: LineCandidate,
+  candidateCells: Map<string, GridCell[]>,
+  uniqueCellCache: Map<string, GridCell[]>,
+  occupancyCache: Map<string, Map<string, number>>,
+  radius = 1,
+): number {
+  const cells = uniqueCellsForCandidate(candidate, candidateCells, uniqueCellCache);
+  if (!cells.length || !uniqueCellsForCandidate(anchor, candidateCells, uniqueCellCache).length) {
+    return 0;
+  }
+
+  return nearbyCoverageRatioForOccupiedCells(
+    cells,
+    occupancyForCandidate(anchor, candidateCells, uniqueCellCache, occupancyCache),
+    Number.NEGATIVE_INFINITY,
+    radius,
+  );
+}
+
+function addAnchorCellsToIndex(
+  anchorCellIndex: Map<string, string[]>,
+  anchor: LineCandidate,
+  cells: GridCell[],
+): void {
+  for (const cell of cells) {
+    const key = cellKey(cell);
+    const anchors = anchorCellIndex.get(key);
+    if (anchors) {
+      anchors.push(anchor.id);
+    } else {
+      anchorCellIndex.set(key, [anchor.id]);
+    }
+  }
+}
+
+function nearbyAnchorIdsForCells(
+  cells: GridCell[],
+  anchorCellIndex: Map<string, string[]>,
+  radius: number,
+): Set<string> {
+  const anchorIds = new Set<string>();
+  const searchRadius = Math.ceil(radius);
+
+  for (const cell of cells) {
+    for (let y = cell.y - searchRadius; y <= cell.y + searchRadius; y += 1) {
+      for (let x = cell.x - searchRadius; x <= cell.x + searchRadius; x += 1) {
+        const nearbyAnchors = anchorCellIndex.get(cellKey({ x, y }));
+        if (!nearbyAnchors) {
+          continue;
+        }
+
+        for (const anchorId of nearbyAnchors) {
+          anchorIds.add(anchorId);
+        }
+      }
+    }
+  }
+
+  return anchorIds;
 }
 
 function isGraphRoadCandidate(candidate: LineCandidate): boolean {
@@ -1050,6 +1018,10 @@ function isCollapsibleRoadCandidate(candidate: LineCandidate): boolean {
 
 function canShareRoadCenterline(left: LineCandidate, right: LineCandidate): boolean {
   return left.kind === right.kind && isCollapsibleRoadCandidate(left) && isCollapsibleRoadCandidate(right);
+}
+
+function isRoadLinkCandidate(candidate: LineCandidate): boolean {
+  return roadDetailTag(candidate.feature).endsWith('_link');
 }
 
 function edgeKey(left: GridCell, right: GridCell): string {
@@ -1152,6 +1124,18 @@ function buildSnappedRoadGraph(candidates: LineCandidate[]): SnappedRoadGraph {
   }
 
   const duplicateAnchors = new Map<string, string>();
+  const uniqueCellCache = new Map<string, GridCell[]>();
+  const occupancyCache = new Map<string, Map<string, number>>();
+  const anchorCellIndex = new Map<string, string[]>();
+  const corridorAnchors = new Map<string, LineCandidate>();
+  const addCorridorAnchor = (candidate: LineCandidate) => {
+    corridorAnchors.set(candidate.id, candidate);
+    addAnchorCellsToIndex(
+      anchorCellIndex,
+      candidate,
+      uniqueCellsForCandidate(candidate, candidateCells, uniqueCellCache),
+    );
+  };
   const collapsibleCandidates = candidates
     .filter(isCollapsibleRoadCandidate)
     .sort((left, right) => {
@@ -1163,36 +1147,65 @@ function buildSnappedRoadGraph(candidates: LineCandidate[]): SnappedRoadGraph {
       return right.length - left.length;
     });
 
-  const corridorAnchors: LineCandidate[] = [];
-
   for (const candidate of collapsibleCandidates) {
     const candidateStatsEntry = candidateStats.get(candidate.id);
     if (!candidateStatsEntry) {
-      corridorAnchors.push(candidate);
+      addCorridorAnchor(candidate);
       continue;
     }
 
     let matchedAnchorId: string | null = null;
+    const candidateUniqueCells = uniqueCellsForCandidate(candidate, candidateCells, uniqueCellCache);
+    const nearbyAnchorIds = nearbyAnchorIdsForCells(
+      candidateUniqueCells,
+      anchorCellIndex,
+      isRoadLinkCandidate(candidate) ? 3 : 2,
+    );
 
-    for (const anchor of corridorAnchors) {
+    for (const anchorId of nearbyAnchorIds) {
+      const anchor = corridorAnchors.get(anchorId);
+      if (!anchor) {
+        continue;
+      }
+
       const anchorStats = candidateStats.get(anchor.id);
       if (!anchorStats || !canShareRoadCenterline(anchor, candidate)) {
         continue;
       }
 
-      const similarity = corridorSimilarity(anchor, candidate, 2);
       const headingSimilarity = Math.abs(lineHeadingSimilarity(anchor.projected, candidate.projected));
       const lengthRatio = Math.min(anchor.length, candidate.length) / Math.max(anchor.length, candidate.length);
       const importanceGap = anchorStats.importance - candidateStatsEntry.importance;
       const isRailPair = anchor.kind === 'rail' && candidate.kind === 'rail';
+      const isRoadLinkPair = isRoadLinkCandidate(anchor) || isRoadLinkCandidate(candidate);
+      const minimumHeadingSimilarity = isRailPair ? 0.68 : isRoadLinkPair ? 0.58 : 0.74;
+      const minimumLengthRatio = isRailPair ? 0.25 : isRoadLinkPair ? 0.1 : 0.35;
 
       if (
-        similarity >= (isRailPair ? 0.48 : 0.58) &&
-        headingSimilarity >= (isRailPair ? 0.68 : 0.74) &&
-        lengthRatio >= (isRailPair ? 0.25 : 0.35) &&
-        importanceGap >= -1 &&
-        candidateStatsEntry.junctionCount <= anchorStats.junctionCount + (isRailPair ? 3 : 1) &&
-        candidateStatsEntry.branchingEndpoints <= anchorStats.branchingEndpoints + (isRailPair ? 2 : 1)
+        headingSimilarity < minimumHeadingSimilarity ||
+        lengthRatio < minimumLengthRatio ||
+        importanceGap < -1 ||
+        candidateStatsEntry.junctionCount > anchorStats.junctionCount + (isRailPair || isRoadLinkPair ? 3 : 1) ||
+        candidateStatsEntry.branchingEndpoints > anchorStats.branchingEndpoints + (isRailPair || isRoadLinkPair ? 3 : 1)
+      ) {
+        continue;
+      }
+
+      const similarity = cachedCorridorSimilarity(
+        anchor,
+        candidate,
+        candidateCells,
+        uniqueCellCache,
+        occupancyCache,
+        2,
+      );
+      const candidateCoverage = isRoadLinkPair
+        ? cachedCorridorCoverageRatio(candidate, anchor, candidateCells, uniqueCellCache, occupancyCache, 2)
+        : 0;
+
+      if (
+        similarity >= (isRailPair ? 0.48 : isRoadLinkPair ? 0.22 : 0.58) ||
+        (isRoadLinkPair && candidateCoverage >= 0.42)
       ) {
         matchedAnchorId = anchor.id;
         break;
@@ -1204,7 +1217,7 @@ function buildSnappedRoadGraph(candidates: LineCandidate[]): SnappedRoadGraph {
       continue;
     }
 
-    corridorAnchors.push(candidate);
+    addCorridorAnchor(candidate);
   }
 
   const candidateRoles = new Map<string, GraphRoadRole>();
@@ -1265,9 +1278,6 @@ function isGraphConnector(candidate: LineCandidate, graph: SnappedRoadGraph): bo
 function collapseParallelRoadCorridors(
   candidates: LineCandidate[],
   graph: SnappedRoadGraph,
-  bbox: BBox,
-  width: number,
-  height: number,
 ): { candidates: LineCandidate[]; collapsedCount: number } {
   const byId = new Map(candidates.map((candidate) => [candidate.id, candidate]));
   const clusters = new Map<string, LineCandidate[]>();
@@ -1308,23 +1318,26 @@ function collapseParallelRoadCorridors(
       continue;
     }
 
-    const orientedProjected = cluster.map((candidate) => orientProjectedLike(anchor.projected, candidate.projected));
-    const sampleCount = Math.round(
-      clamp(Math.max(...orientedProjected.map((projected) => lineLength(projected))) * 1.15, 6, 72),
-    );
-    const averagedProjected = averageProjectedLines(orientedProjected, sampleCount);
-    const averagedCoordinates = averagedProjected.map((point) => unprojectFromGrid(point, bbox, width, height));
-    collapsedCount += cluster.length - 1;
-
     collapsed.push({
       id: anchor.id,
       feature: anchor.feature,
       kind: anchor.kind,
-      coordinates: averagedCoordinates,
-      projected: averagedProjected,
+      coordinates: anchor.coordinates,
+      projected: anchor.projected,
       rank: Math.max(...cluster.map((candidate) => candidate.rank)) + cluster.length * 4,
-      length: lineLength(averagedProjected),
+      length: anchor.length,
     });
+
+    for (const duplicate of cluster.slice(1)) {
+      const stubResult = connectorStubCandidates(duplicate, anchor);
+      if (stubResult.droppedSegments === 0) {
+        collapsed.push(duplicate);
+        continue;
+      }
+
+      collapsedCount += 1;
+      collapsed.push(...stubResult.candidates);
+    }
   }
 
   return {
@@ -1333,82 +1346,88 @@ function collapseParallelRoadCorridors(
   };
 }
 
-function collapseRouteReferenceCorridors(
-  candidates: LineCandidate[],
-  bbox: BBox,
-  width: number,
-  height: number,
-): { candidates: LineCandidate[]; collapsedCount: number } {
-  const routeGroups = new Map<string, LineCandidate[]>();
+function anchorOccupancyForCandidate(anchor: LineCandidate): Map<string, number> {
+  const occupied = new Map<string, number>();
+  updateOccupancy(flattenUniqueCells(rasterizeProjectedLine(anchor.projected)), occupied, anchor.rank);
+  return occupied;
+}
 
-  for (const candidate of candidates) {
-    const key = routeContinuityKey(candidate.feature);
-    if (
-      !key ||
-      !routeReference(candidate.feature) ||
-      candidate.kind !== 'primaryRoad' ||
-      roadDetailTag(candidate.feature).endsWith('_link')
-    ) {
-      continue;
-    }
-
-    routeGroups.set(key, [...(routeGroups.get(key) ?? []), candidate]);
+function candidateRunSpansRenderedCells(projected: GridPoint[]): boolean {
+  if (projected.length < 2) {
+    return false;
   }
 
-  const collapsedIds = new Set<string>();
-  const routeCenterlines: LineCandidate[] = [];
-  let collapsedCount = 0;
+  const cells = flattenUniqueCells(rasterizeProjectedLine(projected));
+  return cells.length >= 2;
+}
 
-  for (const [key, group] of routeGroups.entries()) {
-    const uniqueGroup = group.filter((candidate) => !collapsedIds.has(candidate.id));
-    const totalLength = uniqueGroup.reduce((sum, candidate) => sum + candidate.length, 0);
-    if (uniqueGroup.length < 2 || totalLength < 18) {
-      continue;
+function connectorStubCandidates(
+  duplicate: LineCandidate,
+  anchor: LineCandidate,
+): { candidates: LineCandidate[]; droppedSegments: number } {
+  const anchorOccupied = anchorOccupancyForCandidate(anchor);
+  const coverageRadius = isRoadLinkCandidate(duplicate) || isRoadLinkCandidate(anchor) ? 2 : 1;
+  const coverageThreshold = isRoadLinkCandidate(duplicate) || isRoadLinkCandidate(anchor) ? 0.42 : 0.62;
+  const stubs: LineCandidate[] = [];
+  let droppedSegments = 0;
+  let currentCoordinates: Position[] = [];
+  let currentProjected: GridPoint[] = [];
+
+  const finishRun = () => {
+    if (!candidateRunSpansRenderedCells(currentProjected)) {
+      currentCoordinates = [];
+      currentProjected = [];
+      return;
     }
 
-    const projected = representativeRouteCenterline(uniqueGroup.map((candidate) => candidate.projected));
-    if (!projected || projected.length < 2 || lineLength(projected) < 8) {
-      continue;
+    const length = lineLength(currentProjected);
+    if (length < 1) {
+      currentCoordinates = [];
+      currentProjected = [];
+      return;
     }
 
-    const anchor = uniqueGroup.reduce((best, candidate) => {
-      if (candidate.rank !== best.rank) {
-        return candidate.rank > best.rank ? candidate : best;
-      }
-
-      return candidate.length > best.length ? candidate : best;
-    }, uniqueGroup[0]);
-    const coordinates = projected.map((point) => unprojectFromGrid(point, bbox, width, height));
-    const idKey = key.replace(/[^a-z0-9]+/gi, '-');
-
-    uniqueGroup.forEach((candidate) => collapsedIds.add(candidate.id));
-    collapsedCount += uniqueGroup.length - 1;
-    routeCenterlines.push({
-      id: `route-centerline:${idKey}`,
-      feature: {
-        ...anchor.feature,
-        id: `${anchor.feature.id}:route-centerline`,
-        coordinates,
-      },
-      kind: anchor.kind,
-      coordinates,
-      projected,
-      rank: Math.max(...uniqueGroup.map((candidate) => candidate.rank)) + Math.min(36, uniqueGroup.length * 5),
-      length: lineLength(projected),
+    stubs.push({
+      id: `${duplicate.id}:parallel-stub:${stubs.length}`,
+      feature: duplicate.feature,
+      kind: duplicate.kind,
+      coordinates: currentCoordinates,
+      projected: currentProjected,
+      rank: duplicate.rank - 8,
+      length,
     });
-  }
-
-  if (!collapsedIds.size) {
-    return {
-      candidates,
-      collapsedCount: 0,
-    };
-  }
-
-  return {
-    candidates: [...candidates.filter((candidate) => !collapsedIds.has(candidate.id)), ...routeCenterlines],
-    collapsedCount,
+    currentCoordinates = [];
+    currentProjected = [];
   };
+
+  for (let index = 1; index < duplicate.projected.length; index += 1) {
+    const from = snapToGrid(duplicate.projected[index - 1]);
+    const to = snapToGrid(duplicate.projected[index]);
+    if (from.x === to.x && from.y === to.y) {
+      continue;
+    }
+
+    const segmentCells = rasterizeSegment(from, to);
+    const coveredByAnchor =
+      nearbyCoverageRatio(segmentCells, anchorOccupied, Number.NEGATIVE_INFINITY, coverageRadius) >= coverageThreshold;
+
+    if (coveredByAnchor) {
+      droppedSegments += 1;
+      finishRun();
+      continue;
+    }
+
+    if (!currentCoordinates.length) {
+      currentCoordinates.push(duplicate.coordinates[index - 1]);
+      currentProjected.push(duplicate.projected[index - 1]);
+    }
+    currentCoordinates.push(duplicate.coordinates[index]);
+    currentProjected.push(duplicate.projected[index]);
+  }
+
+  finishRun();
+
+  return { candidates: stubs, droppedSegments };
 }
 
 function isRoadLike(kind: NonNullable<ReturnType<typeof classifyLine>>): boolean {
@@ -1821,10 +1840,10 @@ function pruneDisconnectedRoadSelection(
       }
 
       const sameRoute = Boolean(routeKeys[left] && routeKeys[left] === routeKeys[right]);
-      const routeCenterlineBridge =
+      const routeBridge =
         (isRouteCenterlineCandidate(selected[left].candidate) || isRouteCenterlineCandidate(selected[right].candidate)) &&
         (isInterstateRoute(selected[left].candidate.feature) || isInterstateRoute(selected[right].candidate.feature));
-      const radius = sameRoute ? Math.max(connectionRadius, 7) : routeCenterlineBridge ? 12 : connectionRadius;
+      const radius = sameRoute ? Math.max(connectionRadius, 7) : routeBridge ? 12 : connectionRadius;
 
       if (endpointTouchesIndexedCells(cellsByIndex[left], right, cellIndex, radius)) {
         union(left, right);
@@ -1957,10 +1976,10 @@ function pruneCuratedDisconnectedRoads(
       }
 
       const sameRoute = Boolean(roads[left].routeKey && roads[left].routeKey === roads[right].routeKey);
-      const routeCenterlineBridge =
+      const routeBridge =
         (isRouteCenterlineFeature(roads[left].feature) || isRouteCenterlineFeature(roads[right].feature)) &&
         (roads[left].hasInterstate || roads[right].hasInterstate);
-      const radius = sameRoute ? 7 : routeCenterlineBridge ? 12 : 2;
+      const radius = sameRoute ? 7 : routeBridge ? 12 : 2;
 
       if (endpointTouchesIndexedCells(roads[left].cells, right, cellIndex, radius)) {
         union(left, right);
@@ -2425,6 +2444,7 @@ export function curateFeatures(
   options: CurateFeaturesOptions,
 ): CurateFeaturesResult {
   const profile = detailProfiles[options.detailLevel];
+  const useSourceZoomRoadNetwork = options.roadNetworkMode === 'sourceZoom';
   const curated: MapFeature[] = [];
   const stats: CurateFeaturesStats = {
     originalCount: features.length,
@@ -2492,13 +2512,16 @@ export function curateFeatures(
       continue;
     }
 
-    const simplifiedCoordinates = simplifyCoordinates(
-      line.coordinates,
-      options.bbox,
-      options.width,
-      options.height,
-      profile.simplifyTolerance,
-    );
+    const useSourceGeometry = useSourceZoomRoadNetwork && isRoadLike(kind);
+    const simplifiedCoordinates = useSourceGeometry
+      ? line.coordinates
+      : simplifyCoordinates(
+          line.coordinates,
+          options.bbox,
+          options.width,
+          options.height,
+          profile.simplifyTolerance,
+        );
     if (simplifiedCoordinates.length < 2) {
       stats.droppedShortLines += 1;
       continue;
@@ -2540,29 +2563,26 @@ export function curateFeatures(
   }
 
   const initialRoadGraph = buildSnappedRoadGraph(lineCandidates);
-  const collapsedRoads = collapseParallelRoadCorridors(
-    lineCandidates,
-    initialRoadGraph,
-    options.bbox,
-    options.width,
-    options.height,
-  );
-  const routeCollapsedRoads = collapseRouteReferenceCorridors(
-    collapsedRoads.candidates,
-    options.bbox,
-    options.width,
-    options.height,
-  );
-  const collapsedLineCandidates = routeCollapsedRoads.candidates;
+  const collapsedRoads = collapseParallelRoadCorridors(lineCandidates, initialRoadGraph);
+  const collapsedLineCandidates = collapsedRoads.candidates;
   const roadGraph = buildSnappedRoadGraph(collapsedLineCandidates);
-  const roadSelection = selectRoadNetworkCandidates(
-    collapsedLineCandidates,
-    roadGraph,
-    options.width,
-    options.height,
-    options.roadNetworkDetail,
-  );
-  stats.roadsCollapsed = collapsedRoads.collapsedCount + routeCollapsedRoads.collapsedCount;
+  const roadSelection = useSourceZoomRoadNetwork
+    ? {
+        selectedIds: new Set(
+          collapsedLineCandidates
+            .filter((candidate) => isRoadLike(candidate.kind))
+            .map((candidate) => candidate.id),
+        ),
+        droppedBudget: 0,
+      }
+    : selectRoadNetworkCandidates(
+        collapsedLineCandidates,
+        roadGraph,
+        options.width,
+        options.height,
+        options.roadNetworkDetail,
+      );
+  stats.roadsCollapsed = collapsedRoads.collapsedCount;
   stats.droppedRoadBudget = roadSelection.droppedBudget;
 
   collapsedLineCandidates.sort((left, right) => {
@@ -2676,15 +2696,17 @@ export function curateFeatures(
     }
   }
 
-  const disconnectedRoadsDropped = pruneCuratedDisconnectedRoads(
-    curated,
-    options.bbox,
-    options.width,
-    options.height,
-  );
-  if (disconnectedRoadsDropped > 0) {
-    stats.linesKept = Math.max(0, stats.linesKept - disconnectedRoadsDropped);
-    stats.droppedRoadBudget += disconnectedRoadsDropped;
+  if (!useSourceZoomRoadNetwork) {
+    const disconnectedRoadsDropped = pruneCuratedDisconnectedRoads(
+      curated,
+      options.bbox,
+      options.width,
+      options.height,
+    );
+    if (disconnectedRoadsDropped > 0) {
+      stats.linesKept = Math.max(0, stats.linesKept - disconnectedRoadsDropped);
+      stats.droppedRoadBudget += disconnectedRoadsDropped;
+    }
   }
 
   const keptMarkerPositions: GridPoint[] = [];

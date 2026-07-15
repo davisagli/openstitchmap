@@ -8,6 +8,7 @@ export interface TileRequest {
     lon: number;
   };
   zoomHint: number;
+  roadZoomHint?: number;
   tileSpan?: number;
 }
 
@@ -28,6 +29,8 @@ export interface SourceDiagnostics {
     lat: number;
     zoom: number;
   };
+  zoom: number;
+  roadZoom?: number;
   tileCount: number;
   fetchedTileCount: number;
   totalDecodedFeatures: number;
@@ -60,6 +63,14 @@ export class DemoTileSource implements TileSource {
       title: sampleMap.name,
       bbox: sampleMap.bbox,
       features: sampleMap.features,
+      diagnostics: {
+        zoom: _request.zoomHint,
+        roadZoom: _request.roadZoomHint ?? _request.zoomHint,
+        tileCount: 0,
+        fetchedTileCount: 0,
+        totalDecodedFeatures: sampleMap.features.length,
+        layerStats: [],
+      },
     };
   }
 }

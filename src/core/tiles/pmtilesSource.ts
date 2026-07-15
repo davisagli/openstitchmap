@@ -17,6 +17,7 @@ import {
   createLayerStats,
   decodeVectorTile,
   finalizeLayerStats,
+  isRoadSourceLayer,
 } from './vectorTileDecoder';
 
 interface HeaderLike {
@@ -46,6 +47,16 @@ function rangeForRequest(request: TileRequest, header: HeaderLike): TileRange {
   );
 }
 
+function tileCoordinatesForRange(tileRange: TileRange): Array<{ x: number; y: number }> {
+  const tileCoordinates: Array<{ x: number; y: number }> = [];
+  for (let x = tileRange.minX; x <= tileRange.maxX; x += 1) {
+    for (let y = tileRange.minY; y <= tileRange.maxY; y += 1) {
+      tileCoordinates.push({ x, y });
+    }
+  }
+  return tileCoordinates;
+}
+
 export class PMTilesVectorSource implements TileSource {
   id = 'pmtiles';
   label = 'Live PMTiles archive';
@@ -60,29 +71,53 @@ export class PMTilesVectorSource implements TileSource {
     const metadata = (await this.archive.getMetadata()) as MetadataLike;
     const tileRange = rangeForRequest(request, header);
     const resolvedBBox = request.bbox ?? tileRangeToBBox(tileRange);
+    const roadZoom = request.roadZoomHint ?? tileRange.z;
     const features: MapFeature[] = [];
     const layerStats = createLayerStats();
     let fetchedTileCount = 0;
     let totalDecodedFeatures = 0;
 
-    const tileCoordinates: Array<{ x: number; y: number }> = [];
-    for (let x = tileRange.minX; x <= tileRange.maxX; x += 1) {
-      for (let y = tileRange.minY; y <= tileRange.maxY; y += 1) {
-        tileCoordinates.push({ x, y });
-      }
+    const fetchRange = async (
+      range: TileRange,
+      layerFilter?: (layerName: string) => boolean,
+    ): Promise<{ tileCount: number; fetchedTileCount: number; totalDecodedFeatures: number }> => {
+      const tileCoordinates = tileCoordinatesForRange(range);
+      let rangeFetchedTileCount = 0;
+      let rangeDecodedFeatures = 0;
+
+      await Promise.all(
+        tileCoordinates.map(async ({ x, y }) => {
+          const tileResponse = await this.archive.getZxy(range.z, x, y);
+          if (!tileResponse) {
+            return;
+          }
+
+          rangeFetchedTileCount += 1;
+          rangeDecodedFeatures += decodeVectorTile(tileResponse.data, x, y, range.z, features, layerStats, {
+            layerFilter,
+          });
+        }),
+      );
+
+      return {
+        tileCount: tileCoordinates.length,
+        fetchedTileCount: rangeFetchedTileCount,
+        totalDecodedFeatures: rangeDecodedFeatures,
+      };
+    };
+
+    const baseFilter = roadZoom === tileRange.z ? undefined : (layerName: string) => !isRoadSourceLayer(layerName);
+    const baseResult = await fetchRange(tileRange, baseFilter);
+    let tileCount = baseResult.tileCount;
+    fetchedTileCount += baseResult.fetchedTileCount;
+    totalDecodedFeatures += baseResult.totalDecodedFeatures;
+
+    if (roadZoom !== tileRange.z) {
+      const roadResult = await fetchRange(bboxToTileRange(resolvedBBox, roadZoom), isRoadSourceLayer);
+      tileCount += roadResult.tileCount;
+      fetchedTileCount += roadResult.fetchedTileCount;
+      totalDecodedFeatures += roadResult.totalDecodedFeatures;
     }
-
-    await Promise.all(
-      tileCoordinates.map(async ({ x, y }) => {
-        const tileResponse = await this.archive.getZxy(tileRange.z, x, y);
-        if (!tileResponse) {
-          return;
-        }
-
-        fetchedTileCount += 1;
-        totalDecodedFeatures += decodeVectorTile(tileResponse.data, x, y, tileRange.z, features, layerStats);
-      }),
-    );
 
     const diagnostics: SourceDiagnostics = {
       archiveName: metadata.name,
@@ -97,7 +132,9 @@ export class PMTilesVectorSource implements TileSource {
         lat: header.centerLat,
         zoom: header.centerZoom,
       },
-      tileCount: tileCoordinates.length,
+      zoom: tileRange.z,
+      roadZoom,
+      tileCount,
       fetchedTileCount,
       totalDecodedFeatures,
       layerStats: finalizeLayerStats(layerStats),

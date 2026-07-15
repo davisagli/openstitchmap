@@ -94,14 +94,16 @@ const PREVIEW_OVERSCAN_FACTOR = 1.45;
 const PREVIEW_PADDING = 24;
 const FABRIC_COUNTS: FabricCount[] = [14, 16, 18];
 const NOMINATIM_SEARCH_URL = 'https://nominatim.openstreetmap.org/search';
+const HOSTED_SOURCE_MAX_ZOOM = 14;
+const ROAD_SOURCE_ZOOM_OFFSETS = [2, 1, 0] as const;
 
 const defaultSettings: Settings = {
   center: defaultAreaPreset.center,
   width: 96,
   height: 72,
   fabricCount: 14,
-  detailLevel: 'medium',
-  roadNetworkDetail: 18,
+  detailLevel: 'high',
+  roadNetworkDetail: 1,
   zoomHint: defaultAreaPreset.zoom,
   pmtilesUrl: '',
 };
@@ -127,19 +129,27 @@ function clampRoadNetworkDetail(value: number): number {
     return defaultSettings.roadNetworkDetail;
   }
 
-  return Math.min(100, Math.max(0, Math.round(value)));
+  return Math.min(ROAD_SOURCE_ZOOM_OFFSETS.length - 1, Math.max(0, Math.round(value)));
+}
+
+function roadSourceZoomOffset(detail: number): number {
+  return ROAD_SOURCE_ZOOM_OFFSETS[clampRoadNetworkDetail(detail)];
 }
 
 function roadNetworkDetailLabel(value: number): string {
-  if (value < 28) {
-    return 'Prominent';
+  switch (clampRoadNetworkDetail(value)) {
+    case 0:
+      return 'Low';
+    case 1:
+      return 'Medium';
+    default:
+      return 'High';
   }
+}
 
-  if (value < 62) {
-    return 'Balanced';
-  }
-
-  return 'Dense';
+function roadSourceZoom(baseZoom: number, detail: number): number {
+  const effectiveBaseZoom = Math.min(HOSTED_SOURCE_MAX_ZOOM, baseZoom);
+  return Math.max(0, effectiveBaseZoom - roadSourceZoomOffset(detail));
 }
 
 function viewportSpanX(width: number, height: number): number {
@@ -432,6 +442,7 @@ export function App() {
   useEffect(() => {
     let cancelled = false;
     const source = new HostedVectorTileSource(HOSTED_TILEJSON_URL, 'OpenFreeMap');
+    const roadZoomHint = roadSourceZoom(deferredSettings.zoomHint, deferredSettings.roadNetworkDetail);
 
     setSourceError(null);
     setIsRefreshingPreview(true);
@@ -447,6 +458,7 @@ export function App() {
         ),
         center: deferredSettings.center,
         zoomHint: deferredSettings.zoomHint,
+        roadZoomHint,
       })
       .then((features) => {
         if (cancelled) {
@@ -482,6 +494,7 @@ export function App() {
   }, [
     deferredSettings.center,
     deferredSettings.height,
+    deferredSettings.roadNetworkDetail,
     deferredSettings.width,
     deferredSettings.zoomHint,
   ]);
@@ -525,6 +538,7 @@ export function App() {
         detailLevel: deferredSettings.detailLevel,
         includeMinorRoads: true,
         roadNetworkDetail: deferredSettings.roadNetworkDetail,
+        roadNetworkMode: 'sourceZoom',
       }),
       options: {
         title: `${sourceData.title} Pattern`,
@@ -532,6 +546,7 @@ export function App() {
         height: deferredSettings.height,
         bbox: currentViewportBBox,
         includeMinorRoads: true,
+        pruneDisconnectedRoads: false,
       },
     };
     const preview = {
@@ -542,6 +557,7 @@ export function App() {
         detailLevel: deferredSettings.detailLevel,
         includeMinorRoads: true,
         roadNetworkDetail: deferredSettings.roadNetworkDetail,
+        roadNetworkMode: 'sourceZoom',
       }),
       options: {
         title: `${sourceData.title} Preview`,
@@ -549,6 +565,7 @@ export function App() {
         height: previewHeight,
         bbox: previewViewportBBox,
         includeMinorRoads: true,
+        pruneDisconnectedRoads: false,
       },
     };
 
@@ -947,7 +964,7 @@ export function App() {
     ? curationStats.originalCount - curationStats.curatedCount
     : 0;
   const diagnosticsSummary = diagnostics
-    ? `${diagnostics.fetchedTileCount}/${diagnostics.tileCount} tiles · ${sourceFeatureCount.toLocaleString()} normalized features · ${curatedFeatureCount.toLocaleString()} kept`
+    ? `${diagnostics.fetchedTileCount}/${diagnostics.tileCount} tiles · z${diagnostics.zoom}/roads z${diagnostics.roadZoom ?? diagnostics.zoom} · ${sourceFeatureCount.toLocaleString()} normalized features · ${curatedFeatureCount.toLocaleString()} kept`
     : null;
   const orderedLegend = [
     ...legend.filter((entry) => entry.mode === 'fill'),
@@ -1060,23 +1077,6 @@ export function App() {
         <section className="sidebar-section">
           <div className="control-group">
             <div className="control-row">
-              <div className="legend-title">Stitch detail</div>
-              <div className="segmented three-up" role="tablist" aria-label="Stitch detail">
-                {(['low', 'medium', 'high'] as const).map((level) => (
-                  <button
-                    key={level}
-                    className={`segment ${settings.detailLevel === level ? 'active' : ''}`}
-                    type="button"
-                    onClick={() => updateSettings('detailLevel', level)}
-                  >
-                    {level[0].toUpperCase()}
-                    {level.slice(1)}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div className="control-row">
               <div className="control-label-row">
                 <label htmlFor="road-network-detail">Road detail</label>
                 <span>{roadNetworkDetailLabel(settings.roadNetworkDetail)}</span>
@@ -1086,7 +1086,8 @@ export function App() {
                 id="road-network-detail"
                 type="range"
                 min={0}
-                max={100}
+                max={2}
+                step={1}
                 value={settings.roadNetworkDetail}
                 aria-valuetext={roadNetworkDetailLabel(settings.roadNetworkDetail)}
                 onInput={(event) =>
@@ -1266,6 +1267,10 @@ export function App() {
               <div className="stat-tile">
                 <div className="stat-value">{diagnostics.fetchedTileCount}/{diagnostics.tileCount}</div>
                 <div className="stat-label">Fetched tiles</div>
+              </div>
+              <div className="stat-tile">
+                <div className="stat-value">z{diagnostics.zoom}/z{diagnostics.roadZoom ?? diagnostics.zoom}</div>
+                <div className="stat-label">Area and road source zoom</div>
               </div>
               <div className="stat-tile">
                 <div className="stat-value">{diagnostics.totalDecodedFeatures}</div>

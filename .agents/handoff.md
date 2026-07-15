@@ -35,8 +35,7 @@
   - pattern width / height
   - stitched size
   - fabric count
-  - stitch detail (`low` / `medium` / `high`)
-  - road detail (`Prominent` through `Dense`)
+  - road detail (`Low` / `Medium` / `High`)
   - preview mode (`chart` / `stitched`)
   - export PNG
 - The legend is now the primary feature-filter UI:
@@ -83,15 +82,21 @@
 
 ## Current road-graph approach
 
-- Road selection is now network-growth based rather than a flat per-class budget.
-- Candidates are projected into stitch-grid space, rasterized to occupied cells, and grouped by route continuity using both `ref` and `name`.
-- Named/ref primary routes seed the network. Lower-prominence roads are admitted in repeated aggregation rounds only when they touch the network accumulated so far.
-- The road-detail slider controls the number of aggregation rounds. The default is deliberately selective; the dense end admits most roads that can grow from the existing network.
-- Parallel roads and railways are collapsed before selection. Named motorway/trunk routes also get a representative route centerline so divided interstates render as a single corridor rather than multiple carriageways.
-- Short unlabeled primary fragments near a selected route centerline are treated cautiously. They may bridge selected named routes, but fragments that mostly shadow an interstate are suppressed to avoid ramp/collector clutter.
-- Selected road geometry is rendered directly after endpoint snapping. It no longer goes through the older per-line thinning pass.
-- Connectivity is enforced twice: once after candidate selection and again on compiled road backstitches. Both passes keep the strongest connected component.
-- Interstate centerlines use a larger stitch-grid connection radius so crossings such as I-90 into I-5 survive projection and rounding. Route endpoints on the viewport edge are not pulled inward.
+- Road density now comes primarily from the vector tile pyramid instead of the old graph-growth budget.
+- Hosted/PMTiles loading can fetch road-like layers at a different zoom than fills/POIs. For the hosted OpenFreeMap source, `n` is capped at the source max zoom of 14.
+- The road-detail slider has three settings:
+  - `Low`: roads from `n - 2`
+  - `Medium`: roads from `n - 1`
+  - `High`: roads from `n`
+- Road features use source-tile geometry during curation and are still snapped/simplified during final backstitch compilation.
+- Vector-tile feature IDs are tile-qualified, so clipped high-zoom road fragments no longer overwrite each other by source feature id.
+- Parallel road/rail corridors are collapsed before rendering, but the current collapse no longer averages geometry into a new centerline. It keeps the anchor source geometry, drops overlapping duplicate segments, and preserves non-overlapping connector stubs when they span rendered grid cells.
+- `*_link` roads participate in parallel-corridor matching so freeway ramps/links can be considered part of a corridor while their useful connector tails survive as stubs.
+- The parallel-corridor matcher uses a spatial index of accepted anchors plus cached rasterized cells/occupancy maps to avoid broad pairwise raster checks at high road detail.
+- Route-centerline extraction was removed from the active pipeline because it did little in practice and could create unstable geometry.
+- In source-zoom mode, all remaining road-like candidates are selected after collapse; the old graph-growth selector remains available for non-source-zoom mode.
+- Source-zoom road rendering disables the final single-component road prune so legitimate tile-selected road pieces are not discarded solely for being disconnected.
+- Selected road geometry is still endpoint-snapped before compilation. Route endpoints on the viewport edge are not pulled inward.
 - Compile-time Douglas-Peucker simplification remains enabled for roads so long diagonals do not become blocky staircases.
 
 ## Continuous rail and stream approach
@@ -111,11 +116,10 @@
 - The stitched preview reads more like a finished physical product through fabric texture,
   dimensional floss, softer cross-stitch shadows, and restrained stitch irregularity.
 - Switching between chart and stitched modes no longer changes the preview dimensions.
-- Multi-lane overlap is reduced compared with the early passes.
-- I-5 and I-90 are each represented by one route-centerline feature in the Seattle validation view.
-- Increasing road detail now grows outward from the selected network instead of revealing arbitrary disconnected local segments.
+- Multi-lane overlap is reduced compared with the early raw-vector passes.
+- Road detail now changes the source zoom for road-like layers instead of expanding a manually curated graph budget.
 - Sidewalk-like paths are more aggressively suppressed when they shadow stronger roads.
-- Final rendered road backstitch is pruned to one connected component in the main Seattle probes.
+- Source-zoom road rendering keeps disconnected tile-selected road pieces instead of pruning to one component.
 - Backstitch diagonals look cleaner after the compile-time line simplification pass.
 - Railways and streams no longer lose arbitrary interior segments to overlap thinning, and small same-network endpoint misses are repaired before rendering.
 - The UI is much quieter than earlier versions:
@@ -135,12 +139,10 @@
 ## What still looks rough
 
 - 3/4 stitch smoothing is intentionally conservative and may still leave some edges fully stepped where a human designer might choose a fractional stitch.
-- Major freeway-style corridors are still heuristic, not fully topological. The larger interstate connection radius intentionally favors visual continuity over exact geography.
-- Parallel-way collapse and route-centerline extraction are proximity/route-label based, not a true medial-axis or corridor-spine algorithm.
-- Some primary-route centerlines show wild lateral zigzags. The likely source is `representativeRouteCenterline(...)`: it projects all route fragments onto one global axis and averages lateral offsets, which can jump as fragment coverage changes. Douglas-Peucker does not create the oscillation, but can make it more conspicuous by removing intermediate points.
+- Major freeway-style corridors are still heuristic, not fully topological.
+- Parallel-way collapse is proximity/grid-overlap based, not a true medial-axis or corridor-spine algorithm.
 - Connectivity is measured after rasterization into stitch-grid cells. A road can be geographically connected but miss by a cell, which is why endpoint snapping and the interstate bridge radius still exist.
-- The final backstitch connectivity prune keeps one road component. This is effective visually but can discard a legitimate isolated network when the viewport truly contains more than one road system.
-- Dense mode is substantially heavier because it admits hundreds of road candidates; curation still contains pairwise component checks that are a likely performance target.
+- High road detail can still be heavier because source tiles expose many more road fragments, though the parallel-corridor matcher now uses a spatial index and cached rasterization.
 - There is no dedicated diagnostics UI yet for why a specific road survived, collapsed, or was excluded.
 - The workspace intro copy still says “Use the grouped legend below…” even though the explicit subgroup headings were removed. That copy is functionally fine but could be tightened.
 - The slippy map still works on a stitch-grid abstraction, not true continuous cartographic rendering, so motion can feel a little approximate when rerenders are fast/slow.
@@ -156,13 +158,9 @@
 2. Continue tuning fractional-fill heuristics:
    - inspect cases where the new adjacency rule is too strict or too loose
    - consider whether different fill classes should allow different fractional-stitch aggressiveness
-3. Add road-selection diagnostics that explain seed membership, aggregation round, route-centerline collapse, and final component pruning.
-4. Profile dense road selection and replace remaining pairwise component/proximity checks with a spatial index where it materially helps.
-5. Fix route-centerline zigzags before further tuning junction behavior:
-   - use robust local medians instead of raw lateral means
-   - constrain or smooth abrupt lateral changes
-   - fall back to representative source geometry when a route cannot be modeled safely on one global axis
-6. Revisit whether the final single-component backstitch prune can be replaced by a selection/rendering representation that guarantees the same topology throughout.
+3. Add road diagnostics that explain source zoom, parallel-collapse matches/stubs, endpoint snapping, and final rendered segments.
+4. Continue profiling high road detail if interaction still feels slow; next likely targets are compile-time backstitch simplification and preview drawing.
+5. Revisit whether the final single-component backstitch prune should remain disabled for source-zoom roads or become a more nuanced multi-component filter.
 7. Add focused rail/stream continuity diagnostics or fixtures, especially for fragmented tile-source geometry and water-area clipping.
 8. If UI polish continues:
    - consider slightly tightening the workspace intro text
@@ -194,7 +192,8 @@
   - lines -> `classifyLine(...)`
   - points -> `classifyMarker(...)`
 - The app currently always compiles with `includeMinorRoads: true` and relies on legend toggles for hiding classes instead of a dedicated “include minor roads” control.
-- Road density is independent of stitch detail. `roadNetworkDetail` defaults to `18`; its selection profile maps density to repeated network-growth rounds.
+- Stitch detail is hidden in the UI and defaults to `high`.
+- Road density is independent of stitch detail. `roadNetworkDetail` is a 0/1/2 slider for Low/Medium/High road source zoom offsets.
 - The road curation/rendering pipeline intentionally favors visual continuity and stitchability over geographic fidelity.
 - `continuousLineKind(...)` covers `rail` and `stream`; these kinds bypass `thinLineCandidate(...)` and use whole-candidate duplicate rejection plus same-kind endpoint snapping.
 
@@ -203,7 +202,7 @@
 - In-browser target: `http://127.0.0.1:5173/`
 - Last manually checked state:
   - OpenFreeMap Seattle waterfront default
-  - stitch detail: medium
+  - stitch detail hidden in the UI and defaulted to high
   - preview mode: chart and stitched
   - both preview modes use the same canvas and clipped viewport dimensions
   - stitched mode uses the realistic woven-fabric/floss treatment
@@ -212,14 +211,14 @@
   - legend cards are compact and show DMC floss codes
   - extra vertical space sits below the legend rather than inflating the preview frame
   - render interactions were re-checked after the performance pass
-  - road-detail slider defaults to `Prominent`
+  - road-detail slider defaults to `Medium`
   - boundaries are absent and streams are omitted over water fills
   - rail and stream candidates are retained whole and snap near-touching same-kind endpoints
-  - I-5 and I-90 route probes each produce one centerline feature
-  - compact Seattle probes at road detail 18, 55, and 100 produce one rendered road component
+  - route-centerline extraction has been removed from the active road pipeline
+  - parallel-corridor collapse keeps anchor geometry and preserves rendered connector stubs
 - Build status:
   - `npm run build` passed
-- `git diff --check` passed after the latest continuous-line pass.
+- `git diff --check` passed after the latest source-zoom road pass.
 
 ## Recent commits
 

@@ -44,6 +44,21 @@ const SUPPORTED_LAYERS = new Set([
   'physical_line',
 ]);
 
+const ROAD_SOURCE_LAYERS = new Set([
+  'roads',
+  'transportation',
+  'transportation_name',
+  'transit',
+]);
+
+export function isRoadSourceLayer(layerName: string): boolean {
+  return ROAD_SOURCE_LAYERS.has(layerName.toLowerCase());
+}
+
+export interface DecodeVectorTileOptions {
+  layerFilter?: (layerName: string) => boolean;
+}
+
 function stringValue(
   properties: Record<string, string | number | boolean | null>,
   ...keys: string[]
@@ -284,7 +299,10 @@ function normalizeFeature(
   const properties = feature.properties ?? {};
   const tags = buildNormalizedTags(layerName, properties);
   const name = stringValue(properties, 'name', 'name_en', 'name:latin');
-  const featureId = feature.id ? `${layerName}:${feature.id}` : `${layerName}:${tileId}:${target.length}`;
+  const featureId =
+    feature.id === undefined || feature.id === null
+      ? `${layerName}:${tileId}:${target.length}`
+      : `${layerName}:${tileId}:${feature.id}`;
   const geometryType = feature.geometry.type;
 
   if (geometryType === 'Point') {
@@ -354,11 +372,16 @@ export function decodeVectorTile(
   z: number,
   features: MapFeature[],
   layerStats: Map<string, MutableLayerStat>,
+  options: DecodeVectorTileOptions = {},
 ): number {
   const tile = new VectorTile(new PbfReader(tileData));
   let decodedFeatures = 0;
 
   for (const [layerName, layer] of Object.entries(tile.layers)) {
+    if (options.layerFilter && !options.layerFilter(layerName)) {
+      continue;
+    }
+
     const stat = ensureLayerStat(layerStats, layerName);
 
     for (let index = 0; index < layer.length; index += 1) {

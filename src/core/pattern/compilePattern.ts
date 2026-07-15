@@ -87,6 +87,7 @@ export interface CompilePatternOptions {
   height: number;
   bbox: BBox;
   includeMinorRoads: boolean;
+  pruneDisconnectedRoads?: boolean;
 }
 
 export interface PatternOverlayData {
@@ -874,7 +875,7 @@ export function compilePatternOverlays(
   }
 
   return {
-    backstitches: pruneDisconnectedRoadBackstitches(backstitches),
+    backstitches: options.pruneDisconnectedRoads === false ? backstitches : pruneDisconnectedRoadBackstitches(backstitches),
     markers,
   };
 }

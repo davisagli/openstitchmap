@@ -1,7 +1,7 @@
 import type { BBox, MapFeature } from '../osm';
-import { bboxToTileRange, centeredTileRange, tileRangeToBBox } from './mercator';
+import { bboxToTileRange, centeredTileRange, tileRangeToBBox, type TileRange } from './mercator';
 import type { LoadedSourceData, SourceDiagnostics, TileRequest, TileSource } from './tileSource';
-import { createLayerStats, decodeVectorTile, finalizeLayerStats } from './vectorTileDecoder';
+import { createLayerStats, decodeVectorTile, finalizeLayerStats, isRoadSourceLayer } from './vectorTileDecoder';
 
 interface TileJsonLike {
   attribution?: string;
@@ -35,6 +35,16 @@ function archiveBounds(tileJson: TileJsonLike): BBox | undefined {
   return { minLon, minLat, maxLon, maxLat };
 }
 
+function tileCoordinatesForRange(tileRange: TileRange): Array<{ x: number; y: number }> {
+  const tileCoordinates: Array<{ x: number; y: number }> = [];
+  for (let x = tileRange.minX; x <= tileRange.maxX; x += 1) {
+    for (let y = tileRange.minY; y <= tileRange.maxY; y += 1) {
+      tileCoordinates.push({ x, y });
+    }
+  }
+  return tileCoordinates;
+}
+
 export class HostedVectorTileSource implements TileSource {
   id = 'hosted';
   label = 'Hosted vector tiles';
@@ -56,6 +66,7 @@ export class HostedVectorTileSource implements TileSource {
       lat: tileJson.center?.[1] ?? 0,
     };
     const zoom = clampZoom(request.zoomHint, tileJson);
+    const roadZoom = request.roadZoomHint === undefined ? zoom : clampZoom(request.roadZoomHint, tileJson);
     const tileRange = request.bbox
       ? bboxToTileRange(request.bbox, zoom)
       : centeredTileRange(center.lon, center.lat, zoom, request.tileSpan ?? 2);
@@ -66,25 +77,49 @@ export class HostedVectorTileSource implements TileSource {
     let totalDecodedFeatures = 0;
     const template = tileJson.tiles[0];
 
-    const tileCoordinates: Array<{ x: number; y: number }> = [];
-    for (let x = tileRange.minX; x <= tileRange.maxX; x += 1) {
-      for (let y = tileRange.minY; y <= tileRange.maxY; y += 1) {
-        tileCoordinates.push({ x, y });
-      }
+    const fetchRange = async (
+      range: TileRange,
+      layerFilter?: (layerName: string) => boolean,
+    ): Promise<{ tileCount: number; fetchedTileCount: number; totalDecodedFeatures: number }> => {
+      const tileCoordinates = tileCoordinatesForRange(range);
+      let rangeFetchedTileCount = 0;
+      let rangeDecodedFeatures = 0;
+
+      await Promise.all(
+        tileCoordinates.map(async ({ x, y }) => {
+          const tileResponse = await fetch(replaceTileTemplate(template, range.z, x, y));
+          if (!tileResponse.ok) {
+            return;
+          }
+
+          rangeFetchedTileCount += 1;
+          const tileData = await tileResponse.arrayBuffer();
+          rangeDecodedFeatures += decodeVectorTile(tileData, x, y, range.z, features, layerStats, {
+            layerFilter,
+          });
+        }),
+      );
+
+      return {
+        tileCount: tileCoordinates.length,
+        fetchedTileCount: rangeFetchedTileCount,
+        totalDecodedFeatures: rangeDecodedFeatures,
+      };
+    };
+
+    const baseFilter = roadZoom === zoom ? undefined : (layerName: string) => !isRoadSourceLayer(layerName);
+    const baseResult = await fetchRange(tileRange, baseFilter);
+    let tileCount = baseResult.tileCount;
+    fetchedTileCount += baseResult.fetchedTileCount;
+    totalDecodedFeatures += baseResult.totalDecodedFeatures;
+
+    if (roadZoom !== zoom) {
+      const roadRange = bboxToTileRange(resolvedBBox, roadZoom);
+      const roadResult = await fetchRange(roadRange, isRoadSourceLayer);
+      tileCount += roadResult.tileCount;
+      fetchedTileCount += roadResult.fetchedTileCount;
+      totalDecodedFeatures += roadResult.totalDecodedFeatures;
     }
-
-    await Promise.all(
-      tileCoordinates.map(async ({ x, y }) => {
-        const tileResponse = await fetch(replaceTileTemplate(template, tileRange.z, x, y));
-        if (!tileResponse.ok) {
-          return;
-        }
-
-        fetchedTileCount += 1;
-        const tileData = await tileResponse.arrayBuffer();
-        totalDecodedFeatures += decodeVectorTile(tileData, x, y, tileRange.z, features, layerStats);
-      }),
-    );
 
     const diagnostics: SourceDiagnostics = {
       archiveName: tileJson.name ?? this.displayName,
@@ -96,7 +131,9 @@ export class HostedVectorTileSource implements TileSource {
             zoom: tileJson.center[2],
           }
         : undefined,
-      tileCount: tileCoordinates.length,
+      zoom,
+      roadZoom,
+      tileCount,
       fetchedTileCount,
       totalDecodedFeatures,
       layerStats: finalizeLayerStats(layerStats),
