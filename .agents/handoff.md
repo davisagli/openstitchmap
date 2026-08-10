@@ -19,7 +19,8 @@
   - only cells with a single-corner minority fill are eligible
   - the minority accent color is preserved in both chart and stitched previews
   - a 3/4 stitch is only kept when both the accent side and the dominant side match adjacent cells, so the feature smooths an existing edge instead of creating extra detail
-- Roads, waterways, and rail render as backstitch. Administrative boundaries are excluded entirely.
+- Roads, waterways, rail, and ferry routes render as backstitch. Administrative boundaries are excluded entirely.
+- OpenMapTiles `transportation` features with `class=ferry` are normalized to `route=ferry` and render as a dedicated dark navy `DMC 336` line style with their own legend toggle.
 - Stream backstitch is clipped out where it overlaps a rendered water polygon.
 - POIs render as French-knot-style markers.
 - There is a printable chart preview and a realistic stitched product preview.
@@ -109,12 +110,12 @@
 - Selected road geometry is still endpoint-snapped before compilation.
 - Compile-time Douglas-Peucker simplification remains enabled for roads so long diagonals do not become blocky staircases.
 
-## Continuous rail and stream approach
+## Continuous rail, ferry, and stream approach
 
-- Railways and streams are now treated as atomic continuous-line candidates during curation.
+- Railways, ferry routes, and streams are now treated as atomic continuous-line candidates during curation.
 - A candidate is either kept whole or discarded as a near-complete duplicate; the generic segment-by-segment thinning pass can no longer punch gaps through its interior.
-- Rail and stream occupancy are tracked separately, so a nearby road cannot accidentally suppress either network.
-- After whole-candidate selection, near-touching endpoints snap to another selected line of the same kind. Rail uses a 2-cell radius and streams use a 1.5-cell radius.
+- Rail, ferry, and stream occupancy are tracked separately, so a nearby road cannot accidentally suppress any of these networks.
+- After whole-candidate selection, near-touching endpoints snap to another selected line of the same kind. Rail and ferry routes use a 2-cell radius; streams use a 1.5-cell radius.
 - Endpoints on the viewport edge are left in place so offscreen continuations are not pulled inward.
 - Stream runs are still clipped where they cross rendered water polygons before continuity selection.
 - Parallel railway collapse still happens before this pass.
@@ -132,7 +133,7 @@
 - Sidewalk-like paths are more aggressively suppressed when they shadow stronger roads.
 - Source-zoom road rendering keeps disconnected tile-selected road pieces instead of pruning to one component.
 - Backstitch diagonals look cleaner after the compile-time line simplification pass.
-- Railways and streams no longer lose arbitrary interior segments to overlap thinning, and small same-network endpoint misses are repaired before rendering.
+- Railways, ferry routes, and streams no longer lose arbitrary interior segments to overlap thinning, and small same-network endpoint misses are repaired before rendering.
 - The UI is much quieter than earlier versions:
   - no dataset/source chooser in the active UX
   - no tile zoom/tile span controls
@@ -211,7 +212,7 @@
 - Road density is independent of stitch detail. `roadNetworkDetail` is a 0/1/2 slider for Low/Medium/High road source zoom offsets.
 - The road curation/rendering pipeline intentionally favors visual continuity and stitchability over geographic fidelity.
 - The old road `roadNetworkMode` option, graph-growth budget selector, route-centerline special cases, and compile-time disconnected-road prune were removed in the cleanup pass.
-- `continuousLineKind(...)` covers `rail` and `stream`; these kinds bypass `thinLineCandidate(...)` and use whole-candidate duplicate rejection plus same-kind endpoint snapping.
+- `continuousLineKind(...)` covers `rail`, `ferry`, and `stream`; these kinds bypass `thinLineCandidate(...)` and use whole-candidate duplicate rejection plus same-kind endpoint snapping.
 
 ## Last validated state
 
@@ -232,7 +233,9 @@
   - render interactions were re-checked after the performance pass
   - road-detail slider defaults to `Medium`
   - boundaries are absent and streams are omitted over water fills
-  - rail and stream candidates are retained whole and snap near-touching same-kind endpoints
+  - rail, ferry, and stream candidates are retained whole and snap near-touching same-kind endpoints
+  - live OpenFreeMap data around the Seattle ferry terminal produced a `Ferry Route` legend entry using dark navy `DMC 336`; 19 curated ferry segments rendered across the water after selecting the terminal search result
+  - the ferry legend toggle hides and restores ferry backstitch correctly, with no browser warnings or errors
   - route-centerline extraction has been removed from the active road pipeline
   - parallel-corridor collapse keeps anchor geometry and preserves rendered connector stubs
   - PNG export includes the OpenFreeMap/OpenMapTiles/OpenStreetMap attribution footer
@@ -240,10 +243,12 @@
   - at a 390px viewport, the document stays 390px wide and the oversized preview scrolls within its frame
 - Build status:
   - `npm run build` passed
-- `git diff --check` passed after the map navigation, export attribution, and mobile layout pass.
+- `git diff --check` passed after the ferry route implementation.
 
 ## Recent commits
 
+- `1e3669e` - `Prepare project for open source release`
+- `b78ad08` - `Improve map navigation and export attribution`
 - `1804f61` - `Clean up road pipeline and preview UI`
 - `2bdaab4` - `Use source zoom for road detail`
 - `646020d` - `Refine road network curation`

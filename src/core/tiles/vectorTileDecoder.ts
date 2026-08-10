@@ -156,6 +156,8 @@ function buildNormalizedTags(
     const roadKind = normalizeRoadKind(kind ?? tags.highway ?? tags.railway);
     if (roadKind === 'rail') {
       tags.railway = tags.railway ?? 'tram';
+    } else if (roadKind === 'ferry') {
+      tags.route = tags.route ?? 'ferry';
     } else if (roadKind) {
       tags.highway = tags.highway ?? roadKind;
     }

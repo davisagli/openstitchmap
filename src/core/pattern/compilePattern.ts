@@ -173,6 +173,8 @@ function lineSimplifyTolerance(kind: LineStyleId): number {
       return 0.85;
     case 'rail':
       return 0.75;
+    case 'ferry':
+      return 0.75;
     case 'secondaryRoad':
       return 0.65;
     case 'stream':
@@ -493,6 +495,14 @@ const cellSampleOffsets: Array<[PatternCellCorner, number, number]> = [
 
 export function classifyLine(feature: LineFeature): LineStyleId | null {
   const highway = feature.tags.highway;
+
+  if (
+    feature.tags.route === 'ferry' ||
+    feature.tags.class === 'ferry' ||
+    highway === 'ferry'
+  ) {
+    return 'ferry';
+  }
 
   if (
     highway === 'primary' ||

@@ -564,6 +564,8 @@ function baseLineRank(kind: NonNullable<ReturnType<typeof classifyLine>>): numbe
       return 320;
     case 'rail':
       return 290;
+    case 'ferry':
+      return 270;
     case 'stream':
       return 240;
     case 'secondaryRoad':
@@ -1447,14 +1449,17 @@ function shouldKeepContinuousCandidate(candidate: LineCandidate, occupiedKind: M
   return true;
 }
 
-function continuousLineKind(candidate: LineCandidate): candidate is LineCandidate & { kind: 'rail' | 'stream' } {
-  return candidate.kind === 'rail' || candidate.kind === 'stream';
+type ContinuousLineKind = 'rail' | 'ferry' | 'stream';
+
+function continuousLineKind(candidate: LineCandidate): candidate is LineCandidate & { kind: ContinuousLineKind } {
+  return candidate.kind === 'rail' || candidate.kind === 'ferry' || candidate.kind === 'stream';
 }
 
 function selectContinuousLineCandidates(candidates: LineCandidate[]): Set<string> {
   const selected = new Set<string>();
-  const occupancy = new Map<'rail' | 'stream', Map<string, number>>([
+  const occupancy = new Map<ContinuousLineKind, Map<string, number>>([
     ['rail', new Map<string, number>()],
+    ['ferry', new Map<string, number>()],
     ['stream', new Map<string, number>()],
   ]);
 
@@ -1478,9 +1483,10 @@ function selectContinuousLineCandidates(candidates: LineCandidate[]): Set<string
 function buildContinuousLineCellCounts(
   candidates: LineCandidate[],
   selectedIds: Set<string>,
-): Map<'rail' | 'stream', Map<string, number>> {
-  const counts = new Map<'rail' | 'stream', Map<string, number>>([
+): Map<ContinuousLineKind, Map<string, number>> {
+  const counts = new Map<ContinuousLineKind, Map<string, number>>([
     ['rail', new Map<string, number>()],
+    ['ferry', new Map<string, number>()],
     ['stream', new Map<string, number>()],
   ]);
 
@@ -1495,7 +1501,7 @@ function buildContinuousLineCellCounts(
 }
 
 function snapContinuousLineEndpoints(
-  candidate: LineCandidate & { kind: 'rail' | 'stream' },
+  candidate: LineCandidate & { kind: ContinuousLineKind },
   selectedCellCounts: Map<string, number>,
   bbox: BBox,
   width: number,
@@ -1504,7 +1510,7 @@ function snapContinuousLineEndpoints(
   const projected = candidate.projected.map((point) => ({ ...point }));
   const ownCellCounts = new Map<string, number>();
   incrementCellCounts(flattenUniqueCells(rasterizeProjectedLine(projected)), ownCellCounts);
-  const radius = candidate.kind === 'rail' ? 2 : 1.5;
+  const radius = candidate.kind === 'stream' ? 1.5 : 2;
   let changed = false;
 
   for (const index of [0, projected.length - 1]) {

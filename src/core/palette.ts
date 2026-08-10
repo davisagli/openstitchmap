@@ -11,6 +11,7 @@ export type LineStyleId =
   | 'secondaryRoad'
   | 'path'
   | 'rail'
+  | 'ferry'
   | 'stream';
 
 export type MarkerStyleId =
@@ -124,6 +125,13 @@ export const lineStyles: Record<LineStyleId, LineStyle> = {
     color: '#3e4853',
     floss: 'DMC 413',
     weight: 1.7,
+  },
+  ferry: {
+    id: 'ferry',
+    label: 'Ferry Route',
+    color: '#1f3f66',
+    floss: 'DMC 336',
+    weight: 1.6,
   },
   stream: {
     id: 'stream',
