@@ -1143,14 +1143,16 @@ export function App() {
     }
 
     if (Math.abs(wheelZoomDeltaRef.current) < WHEEL_ZOOM_THRESHOLD) {
-      if (
-        !wheelZoomFeedbackRef.current ||
-        wheelZoomFeedbackRef.current.direction !== direction
-      ) {
+      if (!wheelZoomFeedbackRef.current) {
         wheelZoomFeedbackRef.current = {
           baseMotion: previewMotion,
           direction,
         };
+      } else if (wheelZoomFeedbackRef.current.direction !== direction) {
+        // Keep the motion from before this wheel gesture as its baseline. If
+        // the user reverses direction, previewMotion contains the temporary
+        // feedback scale and must not become the value restored on idle.
+        wheelZoomFeedbackRef.current.direction = direction;
       }
 
       const progress = Math.min(
