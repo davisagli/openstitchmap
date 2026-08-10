@@ -51,6 +51,20 @@ interface WheelZoomFeedback {
   direction: 1 | -1;
 }
 
+interface PreviewPointer {
+  x: number;
+  y: number;
+}
+
+interface PinchGesture {
+  pointerIds: [number, number];
+  baseMotion: PreviewMotion | null;
+  anchorX: number;
+  anchorY: number;
+  startDistance: number;
+  scale: number;
+}
+
 interface Settings {
   center: {
     lat: number;
@@ -181,6 +195,20 @@ function zoomPreviewMotion(
     translateY:
       (1 - zoomFactor) * (anchorY - baseOffsetY) +
       zoomFactor * motion.translateY,
+  };
+}
+
+function pointerDistance(first: PreviewPointer, second: PreviewPointer) {
+  return Math.hypot(second.x - first.x, second.y - first.y);
+}
+
+function pointerMidpoint(
+  first: PreviewPointer,
+  second: PreviewPointer,
+): PreviewPointer {
+  return {
+    x: (first.x + second.x) / 2,
+    y: (first.y + second.y) / 2,
   };
 }
 
@@ -520,6 +548,8 @@ export function App() {
     startX: number;
     startY: number;
   } | null>(null);
+  const activePreviewPointersRef = useRef(new Map<number, PreviewPointer>());
+  const pinchRef = useRef<PinchGesture | null>(null);
   const wheelZoomDeltaRef = useRef(0);
   const wheelZoomFeedbackRef = useRef<WheelZoomFeedback | null>(null);
   const wheelZoomFeedbackResetRef = useRef<number | null>(null);
@@ -1042,19 +1072,108 @@ export function App() {
   function handleCanvasPointerDown(
     event: ReactPointerEvent<HTMLCanvasElement>,
   ) {
+    if (event.pointerType === "mouse" && event.button !== 0) {
+      return;
+    }
+
+    let gestureStartMotion = previewMotion;
+    if (
+      activePreviewPointersRef.current.size === 0 &&
+      wheelZoomFeedbackRef.current
+    ) {
+      gestureStartMotion = wheelZoomFeedbackRef.current.baseMotion;
+      clearWheelFeedbackReset();
+      wheelZoomFeedbackRef.current = null;
+      wheelZoomDeltaRef.current = 0;
+      setPreviewMotion(gestureStartMotion);
+    }
+
+    const pointer = { x: event.clientX, y: event.clientY };
+    activePreviewPointersRef.current.set(event.pointerId, pointer);
+    event.currentTarget.setPointerCapture(event.pointerId);
+
+    if (activePreviewPointersRef.current.size === 2) {
+      const [firstEntry, secondEntry] = Array.from(
+        activePreviewPointersRef.current.entries(),
+      );
+      const [firstId, firstPointer] = firstEntry;
+      const [secondId, secondPointer] = secondEntry;
+      const midpoint = pointerMidpoint(firstPointer, secondPointer);
+      const viewportRect = previewViewportRef.current?.getBoundingClientRect();
+      const baseMotion = dragRef.current?.startMotion ?? gestureStartMotion;
+
+      pinchRef.current = {
+        pointerIds: [firstId, secondId],
+        baseMotion,
+        anchorX: midpoint.x - (viewportRect?.left ?? 0),
+        anchorY: midpoint.y - (viewportRect?.top ?? 0),
+        startDistance: Math.max(1, pointerDistance(firstPointer, secondPointer)),
+        scale: 1,
+      };
+      dragRef.current = null;
+      setPreviewMotion(baseMotion);
+      setIsDraggingPreview(true);
+      return;
+    }
+
+    if (activePreviewPointersRef.current.size > 1) {
+      return;
+    }
+
     dragRef.current = {
       pointerId: event.pointerId,
-      startMotion: previewMotion,
+      startMotion: gestureStartMotion,
       startX: event.clientX,
       startY: event.clientY,
     };
     setIsDraggingPreview(true);
-    event.currentTarget.setPointerCapture(event.pointerId);
   }
 
   function handleCanvasPointerMove(
     event: ReactPointerEvent<HTMLCanvasElement>,
   ) {
+    if (!activePreviewPointersRef.current.has(event.pointerId)) {
+      return;
+    }
+
+    activePreviewPointersRef.current.set(event.pointerId, {
+      x: event.clientX,
+      y: event.clientY,
+    });
+
+    const pinch = pinchRef.current;
+    if (pinch && pinch.pointerIds.includes(event.pointerId)) {
+      const firstPointer = activePreviewPointersRef.current.get(
+        pinch.pointerIds[0],
+      );
+      const secondPointer = activePreviewPointersRef.current.get(
+        pinch.pointerIds[1],
+      );
+      if (!firstPointer || !secondPointer) {
+        return;
+      }
+
+      const scale = Math.min(
+        2 ** (MAX_MAP_ZOOM - settings.zoomHint),
+        Math.max(
+          2 ** (MIN_MAP_ZOOM - settings.zoomHint),
+          pointerDistance(firstPointer, secondPointer) / pinch.startDistance,
+        ),
+      );
+      pinch.scale = scale;
+      setPreviewMotion(
+        zoomPreviewMotion(
+          pinch.baseMotion,
+          pinch.anchorX,
+          pinch.anchorY,
+          previewBaseOffsetX,
+          previewBaseOffsetY,
+          scale,
+        ),
+      );
+      return;
+    }
+
     if (!dragRef.current || dragRef.current.pointerId !== event.pointerId) {
       return;
     }
@@ -1074,8 +1193,48 @@ export function App() {
     });
   }
 
-  function finishCanvasDrag(event: ReactPointerEvent<HTMLCanvasElement>) {
+  function finishCanvasPointer(
+    event: ReactPointerEvent<HTMLCanvasElement>,
+    cancelled = false,
+  ) {
+    if (!activePreviewPointersRef.current.has(event.pointerId)) {
+      return;
+    }
+
+    activePreviewPointersRef.current.set(event.pointerId, {
+      x: event.clientX,
+      y: event.clientY,
+    });
+
+    const pinch = pinchRef.current;
+    if (pinch && pinch.pointerIds.includes(event.pointerId)) {
+      activePreviewPointersRef.current.delete(event.pointerId);
+      pinchRef.current = null;
+      dragRef.current = null;
+      setIsDraggingPreview(false);
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      }
+
+      const zoomDelta = cancelled ? 0 : Math.round(Math.log2(pinch.scale));
+      if (zoomDelta === 0) {
+        setPreviewMotion(pinch.baseMotion);
+      } else {
+        applyPreviewZoom(
+          pinch.anchorX,
+          pinch.anchorY,
+          zoomDelta,
+          pinch.baseMotion,
+        );
+      }
+      return;
+    }
+
+    activePreviewPointersRef.current.delete(event.pointerId);
     if (!dragRef.current || dragRef.current.pointerId !== event.pointerId) {
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      }
       return;
     }
 
@@ -1092,7 +1251,7 @@ export function App() {
       event.currentTarget.releasePointerCapture(event.pointerId);
     }
 
-    if (Math.abs(deltaX) > 2 || Math.abs(deltaY) > 2) {
+    if (!cancelled && (Math.abs(deltaX) > 2 || Math.abs(deltaY) > 2)) {
       setPreviewMotion({
         scale: startMotion.scale,
         translateX: startMotion.translateX + deltaX,
@@ -1119,6 +1278,10 @@ export function App() {
 
     event.preventDefault();
     event.stopPropagation();
+
+    if (activePreviewPointersRef.current.size > 0) {
+      return;
+    }
 
     const normalizedDeltaY =
       event.deltaMode === WheelEvent.DOM_DELTA_LINE
@@ -1563,9 +1726,9 @@ export function App() {
       <main className="workspace">
         <div className="workspace-header">
           <p>
-            Scroll or double-click to zoom and drag the preview to pan. Use the
-            grouped legend below to hide individual areas, ways, or POIs from
-            the stitched map.
+            Scroll, pinch, or double-click to zoom and drag the preview to pan.
+            Use the grouped legend below to hide individual areas, ways, or
+            POIs from the stitched map.
           </p>
 
           <form
@@ -1651,8 +1814,10 @@ export function App() {
                   ref={canvasRef}
                   onPointerDown={handleCanvasPointerDown}
                   onPointerMove={handleCanvasPointerMove}
-                  onPointerUp={finishCanvasDrag}
-                  onPointerCancel={finishCanvasDrag}
+                  onPointerUp={finishCanvasPointer}
+                  onPointerCancel={(event) =>
+                    finishCanvasPointer(event, true)
+                  }
                   onDoubleClick={handleCanvasDoubleClick}
                   style={previewCanvasStyle}
                 />

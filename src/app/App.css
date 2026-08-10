@@ -446,6 +446,8 @@
   display: block;
   box-shadow: 0 22px 50px rgba(16, 35, 29, 0.12);
   border-radius: 0;
+  touch-action: none;
+  user-select: none;
   will-change: transform;
 }
 
