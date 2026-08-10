@@ -1,15 +1,21 @@
-import { useDeferredValue, useEffect, useRef, useState, useTransition } from 'react';
+import {
+  useDeferredValue,
+  useEffect,
+  useRef,
+  useState,
+  useTransition,
+} from "react";
 import type {
   FormEvent as ReactFormEvent,
   MouseEvent as ReactMouseEvent,
   PointerEvent as ReactPointerEvent,
-} from 'react';
-import './App.css';
-import type { BBox, MapFeature, Position } from '../core/osm';
-import type { LoadedSourceData } from '../core/tiles/tileSource';
-import { HostedVectorTileSource } from '../core/tiles/hostedVectorSource';
-import { lonLatToWorld, worldToLonLat } from '../core/tiles/mercator';
-import { areaPresets } from '../core/tiles/presets';
+} from "react";
+import "./App.css";
+import type { BBox, MapFeature, Position } from "../core/osm";
+import type { LoadedSourceData } from "../core/tiles/tileSource";
+import { HostedVectorTileSource } from "../core/tiles/hostedVectorSource";
+import { lonLatToWorld, worldToLonLat } from "../core/tiles/mercator";
+import { areaPresets } from "../core/tiles/presets";
 import {
   buildPatternDocument,
   classifyLine,
@@ -22,17 +28,17 @@ import {
   type PatternCell,
   type PatternDocument,
   type PatternOverlayData,
-} from '../core/pattern/compilePattern';
+} from "../core/pattern/compilePattern";
 import {
   curateFeatures,
   type CurateFeaturesResult,
   type DetailLevel,
-} from '../core/pattern/curateFeatures';
-import { drawChartPreview } from '../render/drawChartPreview';
-import { drawStitchPreview } from '../render/drawStitchPreview';
-import { exportCanvasPng } from '../render/exporters';
+} from "../core/pattern/curateFeatures";
+import { drawChartPreview } from "../render/drawChartPreview";
+import { drawStitchPreview } from "../render/drawStitchPreview";
+import { exportCanvasPng } from "../render/exporters";
 
-type ViewMode = 'chart' | 'stitched';
+type ViewMode = "chart" | "stitched";
 type FabricCount = 14 | 16 | 18;
 
 interface PreviewMotion {
@@ -91,27 +97,32 @@ interface SearchResult {
   bbox: BBox | null;
 }
 
-const HOSTED_TILEJSON_URL = 'https://tiles.openfreemap.org/planet';
+const HOSTED_TILEJSON_URL = "https://tiles.openfreemap.org/planet";
 const defaultAreaPreset = areaPresets[0];
 const SLIPPY_VIEW_HEIGHT_TILES = 1;
 const PREVIEW_OVERSCAN_FACTOR = 1.45;
 const FABRIC_COUNTS: FabricCount[] = [14, 16, 18];
-const NOMINATIM_SEARCH_URL = 'https://nominatim.openstreetmap.org/search';
+const NOMINATIM_SEARCH_URL = "https://nominatim.openstreetmap.org/search";
 const HOSTED_SOURCE_MAX_ZOOM = 14;
 const ROAD_SOURCE_ZOOM_OFFSETS = [2, 1, 0] as const;
 const WHEEL_ZOOM_THRESHOLD = 180;
 const WHEEL_ZOOM_IDLE_COMMIT_THRESHOLD = 48;
 const WHEEL_ZOOM_FEEDBACK_MAX_SCALE = 0.16;
+const DEFAULT_MAP_ZOOM = 11;
+const MIN_MAP_ZOOM = 0;
+const MAX_MAP_ZOOM = 16;
+const TILE_ATTRIBUTION =
+  "OpenFreeMap · © OpenMapTiles · Data © OpenStreetMap contributors";
 
 const defaultSettings: Settings = {
   center: defaultAreaPreset.center,
   width: 96,
   height: 72,
   fabricCount: 14,
-  detailLevel: 'high',
+  detailLevel: "high",
   roadNetworkDetail: 1,
-  zoomHint: defaultAreaPreset.zoom,
-  pmtilesUrl: '',
+  zoomHint: DEFAULT_MAP_ZOOM,
+  pmtilesUrl: "",
 };
 
 function clampDimension(value: number, fallback: number): number {
@@ -138,8 +149,14 @@ function formatLegendUsage(usage: number): string {
   return Math.round(usage).toLocaleString();
 }
 
-function snappedPreviewOffset(previewStitches: number, patternStitches: number, cellSize: number): number {
-  return -Math.max(0, Math.round((previewStitches - patternStitches) / 2)) * cellSize;
+function snappedPreviewOffset(
+  previewStitches: number,
+  patternStitches: number,
+  cellSize: number,
+): number {
+  return (
+    -Math.max(0, Math.round((previewStitches - patternStitches) / 2)) * cellSize
+  );
 }
 
 function defaultPreviewMotion(): PreviewMotion {
@@ -161,13 +178,17 @@ function zoomPreviewMotion(
   const motion = baseMotion ?? defaultPreviewMotion();
   return {
     scale: motion.scale * zoomFactor,
-    translateX: (1 - zoomFactor) * (anchorX - baseOffsetX) + zoomFactor * motion.translateX,
-    translateY: (1 - zoomFactor) * (anchorY - baseOffsetY) + zoomFactor * motion.translateY,
+    translateX:
+      (1 - zoomFactor) * (anchorX - baseOffsetX) +
+      zoomFactor * motion.translateX,
+    translateY:
+      (1 - zoomFactor) * (anchorY - baseOffsetY) +
+      zoomFactor * motion.translateY,
   };
 }
 
 function clampZoom(value: number): number {
-  return Math.min(16, Math.max(10, Math.round(value)));
+  return Math.min(MAX_MAP_ZOOM, Math.max(MIN_MAP_ZOOM, Math.round(value)));
 }
 
 function clampRoadNetworkDetail(value: number): number {
@@ -175,7 +196,10 @@ function clampRoadNetworkDetail(value: number): number {
     return defaultSettings.roadNetworkDetail;
   }
 
-  return Math.min(ROAD_SOURCE_ZOOM_OFFSETS.length - 1, Math.max(0, Math.round(value)));
+  return Math.min(
+    ROAD_SOURCE_ZOOM_OFFSETS.length - 1,
+    Math.max(0, Math.round(value)),
+  );
 }
 
 function roadSourceZoomOffset(detail: number): number {
@@ -185,11 +209,11 @@ function roadSourceZoomOffset(detail: number): number {
 function roadNetworkDetailLabel(value: number): string {
   switch (clampRoadNetworkDetail(value)) {
     case 0:
-      return 'Low';
+      return "Low";
     case 1:
-      return 'Medium';
+      return "Medium";
     default:
-      return 'High';
+      return "High";
   }
 }
 
@@ -255,37 +279,42 @@ function positionsBBox(positions: Position[]): BBox {
 }
 
 function featureBBox(feature: MapFeature): BBox {
-  if (feature.type === 'point') {
+  if (feature.type === "point") {
     const [lon, lat] = feature.coordinates;
     return { minLon: lon, minLat: lat, maxLon: lon, maxLat: lat };
   }
 
-  if (feature.type === 'line') {
+  if (feature.type === "line") {
     return positionsBBox(feature.coordinates);
   }
 
   return positionsBBox(feature.coordinates.flat());
 }
 
-function filterFeaturesToBBox(features: MapFeature[], bbox: BBox): MapFeature[] {
-  return features.filter((feature) => bboxIntersects(featureBBox(feature), bbox));
+function filterFeaturesToBBox(
+  features: MapFeature[],
+  bbox: BBox,
+): MapFeature[] {
+  return features.filter((feature) =>
+    bboxIntersects(featureBBox(feature), bbox),
+  );
 }
 
-function legendEntryKey(entry: Pick<LegendEntry, 'id' | 'mode'>): string {
+function legendEntryKey(entry: Pick<LegendEntry, "id" | "mode">): string {
   return `${entry.mode}:${entry.id}`;
 }
 
 function isInteractiveLegendEntry(entry: LegendEntry): boolean {
-  return !(entry.mode === 'fill' && entry.id === 'ground');
+  return !(entry.mode === "fill" && entry.id === "ground");
 }
 
 function featureLegendKey(feature: MapFeature): string | null {
-  if (feature.type === 'polygon') {
+  if (feature.type === "polygon") {
     const style = classifyPolygon(feature);
     return style ? `fill:${style.id}` : null;
   }
 
-  if (feature.type === 'line') {
+  if (feature.type === "line") {
     const kind = classifyLine(feature);
     return kind ? `line:${kind}` : null;
   }
@@ -294,7 +323,10 @@ function featureLegendKey(feature: MapFeature): string | null {
   return kind ? `marker:${kind}` : null;
 }
 
-function filterFeaturesByLegendSelection(features: MapFeature[], hiddenEntries: Set<string>): MapFeature[] {
+function filterFeaturesByLegendSelection(
+  features: MapFeature[],
+  hiddenEntries: Set<string>,
+): MapFeature[] {
   if (!hiddenEntries.size) {
     return features;
   }
@@ -305,7 +337,10 @@ function filterFeaturesByLegendSelection(features: MapFeature[], hiddenEntries: 
   });
 }
 
-function hasHiddenLegendMode(hiddenEntries: Set<string>, mode: LegendEntry['mode']): boolean {
+function hasHiddenLegendMode(
+  hiddenEntries: Set<string>,
+  mode: LegendEntry["mode"],
+): boolean {
   for (const key of hiddenEntries) {
     if (key.startsWith(`${mode}:`)) {
       return true;
@@ -316,22 +351,29 @@ function hasHiddenLegendMode(hiddenEntries: Set<string>, mode: LegendEntry['mode
 }
 
 function filterBackstitchesByLegendSelection(
-  backstitches: PatternOverlayData['backstitches'],
+  backstitches: PatternOverlayData["backstitches"],
   hiddenEntries: Set<string>,
 ) {
-  if (!hasHiddenLegendMode(hiddenEntries, 'line')) {
+  if (!hasHiddenLegendMode(hiddenEntries, "line")) {
     return backstitches;
   }
 
-  return backstitches.filter((segment) => !hiddenEntries.has(`line:${segment.kind}`));
+  return backstitches.filter(
+    (segment) => !hiddenEntries.has(`line:${segment.kind}`),
+  );
 }
 
-function filterMarkersByLegendSelection(markers: PatternOverlayData['markers'], hiddenEntries: Set<string>) {
-  if (!hasHiddenLegendMode(hiddenEntries, 'marker')) {
+function filterMarkersByLegendSelection(
+  markers: PatternOverlayData["markers"],
+  hiddenEntries: Set<string>,
+) {
+  if (!hasHiddenLegendMode(hiddenEntries, "marker")) {
     return markers;
   }
 
-  return markers.filter((marker) => !hiddenEntries.has(`marker:${marker.kind}`));
+  return markers.filter(
+    (marker) => !hiddenEntries.has(`marker:${marker.kind}`),
+  );
 }
 
 function buildVisiblePattern(
@@ -342,10 +384,22 @@ function buildVisiblePattern(
     return variant.basePattern;
   }
 
-  const backstitches = filterBackstitchesByLegendSelection(variant.baseOverlays.backstitches, hiddenEntries);
-  const markers = filterMarkersByLegendSelection(variant.baseOverlays.markers, hiddenEntries);
-  const cells = hasHiddenLegendMode(hiddenEntries, 'fill')
-    ? compilePatternCells(filterFeaturesByLegendSelection(variant.curation.features, hiddenEntries), variant.options)
+  const backstitches = filterBackstitchesByLegendSelection(
+    variant.baseOverlays.backstitches,
+    hiddenEntries,
+  );
+  const markers = filterMarkersByLegendSelection(
+    variant.baseOverlays.markers,
+    hiddenEntries,
+  );
+  const cells = hasHiddenLegendMode(hiddenEntries, "fill")
+    ? compilePatternCells(
+        filterFeaturesByLegendSelection(
+          variant.curation.features,
+          hiddenEntries,
+        ),
+        variant.options,
+      )
     : variant.baseCells;
 
   return buildPatternDocument({
@@ -360,7 +414,7 @@ function buildVisiblePattern(
 }
 
 function formatSearchDetail(parts: Array<string | null | undefined>): string {
-  return parts.filter((part) => part && part.trim().length > 0).join(', ');
+  return parts.filter((part) => part && part.trim().length > 0).join(", ");
 }
 
 function parseSearchBBox(raw: unknown): BBox | null {
@@ -404,7 +458,7 @@ function searchBBoxToZoom(
 }
 
 function normalizeSearchResult(value: unknown): SearchResult | null {
-  if (!value || typeof value !== 'object') {
+  if (!value || typeof value !== "object") {
     return null;
   }
 
@@ -415,35 +469,38 @@ function normalizeSearchResult(value: unknown): SearchResult | null {
     return null;
   }
 
-  const displayName = typeof result.display_name === 'string' ? result.display_name : 'Unnamed place';
+  const displayName =
+    typeof result.display_name === "string"
+      ? result.display_name
+      : "Unnamed place";
   const name =
-    typeof result.name === 'string' && result.name.trim().length > 0
+    typeof result.name === "string" && result.name.trim().length > 0
       ? result.name
-      : displayName.split(',')[0]?.trim() || displayName;
+      : displayName.split(",")[0]?.trim() || displayName;
   const address =
-    typeof result.address === 'object' && result.address
+    typeof result.address === "object" && result.address
       ? (result.address as Record<string, unknown>)
       : null;
   const detail = formatSearchDetail([
-    typeof result.type === 'string' ? result.type : null,
+    typeof result.type === "string" ? result.type : null,
     address
       ? formatSearchDetail([
-          typeof address.city === 'string'
+          typeof address.city === "string"
             ? address.city
-            : typeof address.town === 'string'
+            : typeof address.town === "string"
               ? address.town
-              : typeof address.village === 'string'
+              : typeof address.village === "string"
                 ? address.village
                 : null,
-          typeof address.state === 'string' ? address.state : null,
-          typeof address.country === 'string' ? address.country : null,
+          typeof address.state === "string" ? address.state : null,
+          typeof address.country === "string" ? address.country : null,
         ])
-      : displayName.split(',').slice(1).join(',').trim(),
+      : displayName.split(",").slice(1).join(",").trim(),
   ]);
 
   return {
     id:
-      typeof result.place_id === 'number' || typeof result.place_id === 'string'
+      typeof result.place_id === "number" || typeof result.place_id === "string"
         ? String(result.place_id)
         : `${lat},${lon}`,
     label: name,
@@ -469,31 +526,50 @@ export function App() {
   const wheelZoomDeltaRef = useRef(0);
   const wheelZoomFeedbackRef = useRef<WheelZoomFeedback | null>(null);
   const wheelZoomFeedbackResetRef = useRef<number | null>(null);
-  const [viewMode, setViewMode] = useState<ViewMode>('chart');
+  const [viewMode, setViewMode] = useState<ViewMode>("chart");
   const [isDraggingPreview, setIsDraggingPreview] = useState(false);
-  const [previewMotion, setPreviewMotion] = useState<PreviewMotion | null>(null);
+  const [previewMotion, setPreviewMotion] = useState<PreviewMotion | null>(
+    null,
+  );
   const [settings, setSettings] = useState<Settings>(defaultSettings);
   const deferredSettings = useDeferredValue(settings);
   const [sourceData, setSourceData] = useState<LoadedSourceData | null>(null);
-  const [preparedViewport, setPreparedViewport] = useState<PreparedViewportData | null>(null);
-  const [compiledViewport, setCompiledViewport] = useState<CompiledViewportData | null>(null);
+  const [preparedViewport, setPreparedViewport] =
+    useState<PreparedViewportData | null>(null);
+  const [compiledViewport, setCompiledViewport] =
+    useState<CompiledViewportData | null>(null);
   const [curation, setCuration] = useState<CurateFeaturesResult | null>(null);
   const [availableLegend, setAvailableLegend] = useState<LegendEntry[]>([]);
-  const [hiddenLegendEntries, setHiddenLegendEntries] = useState<Set<string>>(new Set());
+  const [hiddenLegendEntries, setHiddenLegendEntries] = useState<Set<string>>(
+    new Set(),
+  );
   const [pattern, setPattern] = useState<PatternDocument | null>(null);
-  const [previewPattern, setPreviewPattern] = useState<PatternDocument | null>(null);
+  const [previewPattern, setPreviewPattern] = useState<PatternDocument | null>(
+    null,
+  );
   const [sourceError, setSourceError] = useState<string | null>(null);
   const [isRefreshingPreview, setIsRefreshingPreview] = useState(true);
   const [isPending, startTransition] = useTransition();
-  const [searchQuery, setSearchQuery] = useState('');
+  const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [searchError, setSearchError] = useState<string | null>(null);
-  const [searchStatus, setSearchStatus] = useState<'idle' | 'loading' | 'done'>('idle');
+  const [searchStatus, setSearchStatus] = useState<"idle" | "loading" | "done">(
+    "idle",
+  );
+  const [locationStatus, setLocationStatus] = useState<"idle" | "loading">(
+    "idle",
+  );
 
   useEffect(() => {
     let cancelled = false;
-    const source = new HostedVectorTileSource(HOSTED_TILEJSON_URL, 'OpenFreeMap');
-    const roadZoomHint = roadSourceZoom(deferredSettings.zoomHint, deferredSettings.roadNetworkDetail);
+    const source = new HostedVectorTileSource(
+      HOSTED_TILEJSON_URL,
+      "OpenFreeMap",
+    );
+    const roadZoomHint = roadSourceZoom(
+      deferredSettings.zoomHint,
+      deferredSettings.roadNetworkDetail,
+    );
 
     setSourceError(null);
     setIsRefreshingPreview(true);
@@ -525,7 +601,10 @@ export function App() {
           return;
         }
 
-        const message = error instanceof Error ? error.message : 'Unable to load the selected source.';
+        const message =
+          error instanceof Error
+            ? error.message
+            : "Unable to load the selected source.";
         startTransition(() => {
           setSourceData(null);
           setPreparedViewport(null);
@@ -578,8 +657,14 @@ export function App() {
       deferredSettings.height + 8,
       Math.round(deferredSettings.height * PREVIEW_OVERSCAN_FACTOR),
     );
-    const actualFeatures = filterFeaturesToBBox(sourceData.features, currentViewportBBox);
-    const previewFeatures = filterFeaturesToBBox(sourceData.features, previewViewportBBox);
+    const actualFeatures = filterFeaturesToBBox(
+      sourceData.features,
+      currentViewportBBox,
+    );
+    const previewFeatures = filterFeaturesToBBox(
+      sourceData.features,
+      previewViewportBBox,
+    );
 
     const actual = {
       curation: curateFeatures(actualFeatures, {
@@ -669,7 +754,9 @@ export function App() {
     });
 
     startTransition(() => {
-      setAvailableLegend(actualBasePattern.legend.filter(isInteractiveLegendEntry));
+      setAvailableLegend(
+        actualBasePattern.legend.filter(isInteractiveLegendEntry),
+      );
       setCompiledViewport({
         actual: {
           ...preparedViewport.actual,
@@ -683,7 +770,9 @@ export function App() {
           baseOverlays: previewBaseOverlays,
           basePattern: previewBasePattern,
         },
-        availableLegend: actualBasePattern.legend.filter(isInteractiveLegendEntry),
+        availableLegend: actualBasePattern.legend.filter(
+          isInteractiveLegendEntry,
+        ),
       });
     });
   }, [preparedViewport]);
@@ -695,8 +784,14 @@ export function App() {
 
     setIsRefreshingPreview(true);
 
-    const nextPattern = buildVisiblePattern(compiledViewport.actual, hiddenLegendEntries);
-    const nextPreviewPattern = buildVisiblePattern(compiledViewport.preview, hiddenLegendEntries);
+    const nextPattern = buildVisiblePattern(
+      compiledViewport.actual,
+      hiddenLegendEntries,
+    );
+    const nextPreviewPattern = buildVisiblePattern(
+      compiledViewport.preview,
+      hiddenLegendEntries,
+    );
 
     startTransition(() => {
       setPattern(nextPattern);
@@ -711,7 +806,7 @@ export function App() {
 
     const cellSize = Math.max(7, Math.min(14, Math.floor(860 / pattern.width)));
 
-    if (viewMode === 'chart') {
+    if (viewMode === "chart") {
       drawChartPreview(canvasRef.current, previewPattern, cellSize);
     } else {
       drawStitchPreview(canvasRef.current, previewPattern, cellSize);
@@ -721,12 +816,15 @@ export function App() {
     setPreviewMotion((current) => (current ? null : current));
   }, [pattern, previewPattern, viewMode]);
 
-  useEffect(() => () => {
-    searchAbortRef.current?.abort();
-    if (wheelZoomFeedbackResetRef.current !== null) {
-      window.clearTimeout(wheelZoomFeedbackResetRef.current);
-    }
-  }, []);
+  useEffect(
+    () => () => {
+      searchAbortRef.current?.abort();
+      if (wheelZoomFeedbackResetRef.current !== null) {
+        window.clearTimeout(wheelZoomFeedbackResetRef.current);
+      }
+    },
+    [],
+  );
 
   useEffect(() => {
     const frame = previewFrameRef.current;
@@ -735,8 +833,8 @@ export function App() {
     }
 
     const handleWheel = (event: WheelEvent) => handlePreviewWheel(event);
-    frame.addEventListener('wheel', handleWheel, { passive: false });
-    return () => frame.removeEventListener('wheel', handleWheel);
+    frame.addEventListener("wheel", handleWheel, { passive: false });
+    return () => frame.removeEventListener("wheel", handleWheel);
   });
 
   useEffect(() => {
@@ -753,11 +851,15 @@ export function App() {
       setSearchResults([]);
     }
 
-    document.addEventListener('pointerdown', closeSearchResults);
-    return () => document.removeEventListener('pointerdown', closeSearchResults);
+    document.addEventListener("pointerdown", closeSearchResults);
+    return () =>
+      document.removeEventListener("pointerdown", closeSearchResults);
   }, [searchResults.length]);
 
-  function updateSettings<K extends keyof Settings>(key: K, value: Settings[K]) {
+  function updateSettings<K extends keyof Settings>(
+    key: K,
+    value: Settings[K],
+  ) {
     setSettings((current) => ({
       ...current,
       [key]: value,
@@ -778,12 +880,17 @@ export function App() {
         lat: result.lat,
         lon: result.lon,
       },
-      zoomHint: searchBBoxToZoom(result.bbox, current.width, current.height, current.zoomHint),
+      zoomHint: searchBBoxToZoom(
+        result.bbox,
+        current.width,
+        current.height,
+        current.zoomHint,
+      ),
     }));
     setSearchQuery(result.label);
     setSearchResults([]);
     setSearchError(null);
-    setSearchStatus('idle');
+    setSearchStatus("idle");
     setPreviewMotion(null);
   }
 
@@ -792,8 +899,8 @@ export function App() {
     const query = searchQuery.trim();
     if (!query) {
       setSearchResults([]);
-      setSearchError('Type a place name, neighborhood, or address to search.');
-      setSearchStatus('idle');
+      setSearchError("Type a place name, neighborhood, or address to search.");
+      setSearchStatus("idle");
       return;
     }
 
@@ -801,22 +908,25 @@ export function App() {
     const abortController = new AbortController();
     searchAbortRef.current = abortController;
 
-    setSearchStatus('loading');
+    setSearchStatus("loading");
     setSearchError(null);
 
     try {
       const params = new URLSearchParams({
         q: query,
-        format: 'jsonv2',
-        limit: '5',
-        addressdetails: '1',
+        format: "jsonv2",
+        limit: "5",
+        addressdetails: "1",
       });
-      const response = await fetch(`${NOMINATIM_SEARCH_URL}?${params.toString()}`, {
-        signal: abortController.signal,
-        headers: {
-          Accept: 'application/json',
+      const response = await fetch(
+        `${NOMINATIM_SEARCH_URL}?${params.toString()}`,
+        {
+          signal: abortController.signal,
+          headers: {
+            Accept: "application/json",
+          },
         },
-      });
+      );
 
       if (!response.ok) {
         throw new Error(`Search failed with status ${response.status}.`);
@@ -824,27 +934,75 @@ export function App() {
 
       const payload: unknown = await response.json();
       const results = Array.isArray(payload)
-        ? payload.map(normalizeSearchResult).filter((result): result is SearchResult => Boolean(result))
+        ? payload
+            .map(normalizeSearchResult)
+            .filter((result): result is SearchResult => Boolean(result))
         : [];
 
       setSearchResults(results);
-      setSearchStatus('done');
-      setSearchError(results.length ? null : `No matches found for "${query}".`);
+      setSearchStatus("done");
+      setSearchError(
+        results.length ? null : `No matches found for "${query}".`,
+      );
     } catch (error: unknown) {
       if (abortController.signal.aborted) {
         return;
       }
 
       const message =
-        error instanceof Error ? error.message : 'Unable to search for that location right now.';
+        error instanceof Error
+          ? error.message
+          : "Unable to search for that location right now.";
       setSearchResults([]);
-      setSearchStatus('done');
+      setSearchStatus("done");
       setSearchError(message);
     } finally {
       if (searchAbortRef.current === abortController) {
         searchAbortRef.current = null;
       }
     }
+  }
+
+  function handleCurrentLocation() {
+    if (!navigator.geolocation) {
+      setSearchError("Your browser does not support location services.");
+      return;
+    }
+
+    setLocationStatus("loading");
+    setSearchError(null);
+    setSearchResults([]);
+
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        setSettings((current) => ({
+          ...current,
+          center: {
+            lat: position.coords.latitude,
+            lon: position.coords.longitude,
+          },
+        }));
+        setSearchQuery("");
+        setSearchStatus("idle");
+        setLocationStatus("idle");
+        setPreviewMotion(null);
+      },
+      (error) => {
+        const message =
+          error.code === 1
+            ? "Location access was denied. Enable it in your browser settings to center the map."
+            : error.code === 3
+              ? "Finding your location took too long. Please try again."
+              : "Unable to determine your current location.";
+        setSearchError(message);
+        setLocationStatus("idle");
+      },
+      {
+        enableHighAccuracy: false,
+        maximumAge: 300_000,
+        timeout: 10_000,
+      },
+    );
   }
 
   function applyPan(deltaX: number, deltaY: number) {
@@ -859,11 +1017,18 @@ export function App() {
     setSettings((current) => ({
       ...current,
       center: (() => {
-        const aspectRatio = Math.max(0.5, current.width / Math.max(1, current.height));
+        const aspectRatio = Math.max(
+          0.5,
+          current.width / Math.max(1, current.height),
+        );
         const spanY = SLIPPY_VIEW_HEIGHT_TILES;
         const spanX = spanY * aspectRatio;
         const worldScale = 2 ** current.zoomHint;
-        const currentWorld = lonLatToWorld(current.center.lon, current.center.lat, current.zoomHint);
+        const currentWorld = lonLatToWorld(
+          current.center.lon,
+          current.center.lat,
+          current.zoomHint,
+        );
         const nextX = Math.min(
           worldScale - 1e-6,
           Math.max(0, currentWorld.x - (deltaX / width) * spanX),
@@ -877,7 +1042,9 @@ export function App() {
     }));
   }
 
-  function handleCanvasPointerDown(event: ReactPointerEvent<HTMLCanvasElement>) {
+  function handleCanvasPointerDown(
+    event: ReactPointerEvent<HTMLCanvasElement>,
+  ) {
     dragRef.current = {
       pointerId: event.pointerId,
       startMotion: previewMotion,
@@ -888,7 +1055,9 @@ export function App() {
     event.currentTarget.setPointerCapture(event.pointerId);
   }
 
-  function handleCanvasPointerMove(event: ReactPointerEvent<HTMLCanvasElement>) {
+  function handleCanvasPointerMove(
+    event: ReactPointerEvent<HTMLCanvasElement>,
+  ) {
     if (!dragRef.current || dragRef.current.pointerId !== event.pointerId) {
       return;
     }
@@ -901,8 +1070,10 @@ export function App() {
 
     setPreviewMotion({
       scale: startMotion.scale,
-      translateX: startMotion.translateX + (event.clientX - dragRef.current.startX),
-      translateY: startMotion.translateY + (event.clientY - dragRef.current.startY),
+      translateX:
+        startMotion.translateX + (event.clientX - dragRef.current.startX),
+      translateY:
+        startMotion.translateY + (event.clientY - dragRef.current.startY),
     });
   }
 
@@ -934,9 +1105,13 @@ export function App() {
       return;
     }
 
-    setPreviewMotion(startMotion.scale === 1 && startMotion.translateX === 0 && startMotion.translateY === 0
-      ? null
-      : startMotion);
+    setPreviewMotion(
+      startMotion.scale === 1 &&
+        startMotion.translateX === 0 &&
+        startMotion.translateY === 0
+        ? null
+        : startMotion,
+    );
   }
 
   function handlePreviewWheel(event: WheelEvent) {
@@ -959,7 +1134,8 @@ export function App() {
     const anchorX = event.clientX - rect.left;
     const anchorY = event.clientY - rect.top;
     const direction = wheelZoomDeltaRef.current < 0 ? 1 : -1;
-    const canCommitZoom = clampZoom(settings.zoomHint + direction) !== settings.zoomHint;
+    const canCommitZoom =
+      clampZoom(settings.zoomHint + direction) !== settings.zoomHint;
     if (!canCommitZoom) {
       const feedback = wheelZoomFeedbackRef.current;
       clearWheelFeedbackReset();
@@ -970,14 +1146,20 @@ export function App() {
     }
 
     if (Math.abs(wheelZoomDeltaRef.current) < WHEEL_ZOOM_THRESHOLD) {
-      if (!wheelZoomFeedbackRef.current || wheelZoomFeedbackRef.current.direction !== direction) {
+      if (
+        !wheelZoomFeedbackRef.current ||
+        wheelZoomFeedbackRef.current.direction !== direction
+      ) {
         wheelZoomFeedbackRef.current = {
           baseMotion: previewMotion,
           direction,
         };
       }
 
-      const progress = Math.min(0.96, Math.abs(wheelZoomDeltaRef.current) / WHEEL_ZOOM_THRESHOLD);
+      const progress = Math.min(
+        0.96,
+        Math.abs(wheelZoomDeltaRef.current) / WHEEL_ZOOM_THRESHOLD,
+      );
       const zoomFactor =
         direction > 0
           ? 1 + progress * WHEEL_ZOOM_FEEDBACK_MAX_SCALE
@@ -1001,8 +1183,16 @@ export function App() {
         wheelZoomDeltaRef.current = 0;
         wheelZoomFeedbackResetRef.current = null;
 
-        if (feedback && Math.abs(accumulatedDelta) >= WHEEL_ZOOM_IDLE_COMMIT_THRESHOLD) {
-          applyPreviewZoom(anchorX, anchorY, feedback.direction, feedback.baseMotion);
+        if (
+          feedback &&
+          Math.abs(accumulatedDelta) >= WHEEL_ZOOM_IDLE_COMMIT_THRESHOLD
+        ) {
+          applyPreviewZoom(
+            anchorX,
+            anchorY,
+            feedback.direction,
+            feedback.baseMotion,
+          );
         } else {
           setPreviewMotion(feedback?.baseMotion ?? null);
         }
@@ -1010,7 +1200,8 @@ export function App() {
       return;
     }
 
-    const feedbackBaseMotion = wheelZoomFeedbackRef.current?.baseMotion ?? previewMotion;
+    const feedbackBaseMotion =
+      wheelZoomFeedbackRef.current?.baseMotion ?? previewMotion;
     const zoomDelta = direction;
     wheelZoomDeltaRef.current = 0;
     wheelZoomFeedbackRef.current = null;
@@ -1049,10 +1240,17 @@ export function App() {
           return { zoomHint: current.zoomHint, center: current.center };
         }
 
-        const aspectRatio = Math.max(0.5, current.width / Math.max(1, current.height));
+        const aspectRatio = Math.max(
+          0.5,
+          current.width / Math.max(1, current.height),
+        );
         const oldSpanY = SLIPPY_VIEW_HEIGHT_TILES;
         const oldSpanX = oldSpanY * aspectRatio;
-        const currentWorld = lonLatToWorld(current.center.lon, current.center.lat, current.zoomHint);
+        const currentWorld = lonLatToWorld(
+          current.center.lon,
+          current.center.lat,
+          current.zoomHint,
+        );
         const worldX = currentWorld.x + (normalizedX - 0.5) * oldSpanX;
         const worldY = currentWorld.y + (normalizedY - 0.5) * oldSpanY;
         const focus = worldToLonLat(worldX, worldY, current.zoomHint);
@@ -1074,8 +1272,18 @@ export function App() {
 
     const zoomFactor = 2 ** zoomDelta;
     setPreviewMotion((currentPreviewMotion) => {
-      const baseMotion = baseMotionOverride === undefined ? currentPreviewMotion : baseMotionOverride;
-      return zoomPreviewMotion(baseMotion, anchorX, anchorY, previewBaseOffsetX, previewBaseOffsetY, zoomFactor);
+      const baseMotion =
+        baseMotionOverride === undefined
+          ? currentPreviewMotion
+          : baseMotionOverride;
+      return zoomPreviewMotion(
+        baseMotion,
+        anchorX,
+        anchorY,
+        previewBaseOffsetX,
+        previewBaseOffsetY,
+        zoomFactor,
+      );
     });
   }
 
@@ -1094,7 +1302,11 @@ export function App() {
       return;
     }
 
-    exportCanvasPng(canvasRef.current, `${pattern.title.toLowerCase().replace(/\s+/g, '-')}-${viewMode}.png`);
+    exportCanvasPng(
+      canvasRef.current,
+      `${pattern.title.toLowerCase().replace(/\s+/g, "-")}-${viewMode}.png`,
+      TILE_ATTRIBUTION,
+    );
   }
 
   function toggleLegendEntry(entry: LegendEntry) {
@@ -1122,12 +1334,15 @@ export function App() {
     ? `${diagnostics.fetchedTileCount}/${diagnostics.tileCount} tiles · z${diagnostics.zoom}/roads z${diagnostics.roadZoom ?? diagnostics.zoom} · ${sourceFeatureCount.toLocaleString()} normalized features · ${curatedFeatureCount.toLocaleString()} kept`
     : null;
   const orderedLegend = [
-    ...legend.filter((entry) => entry.mode === 'fill'),
-    ...legend.filter((entry) => entry.mode === 'line'),
-    ...legend.filter((entry) => entry.mode === 'marker'),
+    ...legend.filter((entry) => entry.mode === "fill"),
+    ...legend.filter((entry) => entry.mode === "line"),
+    ...legend.filter((entry) => entry.mode === "marker"),
   ];
 
-  const cellSize = Math.max(7, Math.min(14, Math.floor(860 / Math.max(1, settings.width))));
+  const cellSize = Math.max(
+    7,
+    Math.min(14, Math.floor(860 / Math.max(1, settings.width))),
+  );
   const previewViewportStyle =
     pattern && previewPattern
       ? {
@@ -1136,21 +1351,28 @@ export function App() {
         }
       : undefined;
   const previewBaseOffsetX =
-    pattern && previewPattern ? snappedPreviewOffset(previewPattern.width, pattern.width, cellSize) : 0;
+    pattern && previewPattern
+      ? snappedPreviewOffset(previewPattern.width, pattern.width, cellSize)
+      : 0;
   const previewBaseOffsetY =
-    pattern && previewPattern ? snappedPreviewOffset(previewPattern.height, pattern.height, cellSize) : 0;
+    pattern && previewPattern
+      ? snappedPreviewOffset(previewPattern.height, pattern.height, cellSize)
+      : 0;
   const previewCanvasStyle =
     pattern && previewPattern
       ? {
           transform: `translate(${previewBaseOffsetX + (previewMotion?.translateX ?? 0)}px, ${
             previewBaseOffsetY + (previewMotion?.translateY ?? 0)
           }px) scale(${previewMotion?.scale ?? 1})`,
-          transformOrigin: '0 0',
+          transformOrigin: "0 0",
         }
       : undefined;
   const isRenderingPreview = isRefreshingPreview || isPending;
   const stitchedWidth = stitchedSizeLabel(settings.width, settings.fabricCount);
-  const stitchedHeight = stitchedSizeLabel(settings.height, settings.fabricCount);
+  const stitchedHeight = stitchedSizeLabel(
+    settings.height,
+    settings.fabricCount,
+  );
 
   return (
     <div className="app-shell">
@@ -1159,8 +1381,8 @@ export function App() {
           <p className="eyebrow">Map-to-stitch compiler</p>
           <h1>OpenStitchMap</h1>
           <p>
-            Turn OSM-style features into a printable cross stitch chart with
-            roads as backstitch and landmarks as symbols.
+            Turn map features into a printable cross stitch chart with roads as
+            backstitch and landmarks as symbols.
           </p>
         </div>
 
@@ -1177,7 +1399,13 @@ export function App() {
                   max={180}
                   value={settings.width}
                   onChange={(event) =>
-                    updateSettings('width', clampDimension(Number(event.target.value), settings.width))
+                    updateSettings(
+                      "width",
+                      clampDimension(
+                        Number(event.target.value),
+                        settings.width,
+                      ),
+                    )
                   }
                 />
               </div>
@@ -1192,7 +1420,13 @@ export function App() {
                   max={180}
                   value={settings.height}
                   onChange={(event) =>
-                    updateSettings('height', clampDimension(Number(event.target.value), settings.height))
+                    updateSettings(
+                      "height",
+                      clampDimension(
+                        Number(event.target.value),
+                        settings.height,
+                      ),
+                    )
                   }
                 />
               </div>
@@ -1208,7 +1442,7 @@ export function App() {
                       name="fabric-count"
                       value={count}
                       checked={settings.fabricCount === count}
-                      onChange={() => updateSettings('fabricCount', count)}
+                      onChange={() => updateSettings("fabricCount", count)}
                     />
                     <span>{count} count</span>
                   </label>
@@ -1237,7 +1471,9 @@ export function App() {
             <div className="control-row">
               <div className="control-label-row">
                 <label htmlFor="road-network-detail">Road detail</label>
-                <span>{roadNetworkDetailLabel(settings.roadNetworkDetail)}</span>
+                <span>
+                  {roadNetworkDetailLabel(settings.roadNetworkDetail)}
+                </span>
               </div>
               <input
                 className="range-input"
@@ -1247,30 +1483,42 @@ export function App() {
                 max={2}
                 step={1}
                 value={settings.roadNetworkDetail}
-                aria-valuetext={roadNetworkDetailLabel(settings.roadNetworkDetail)}
+                aria-valuetext={roadNetworkDetailLabel(
+                  settings.roadNetworkDetail,
+                )}
                 onInput={(event) =>
-                  updateSettings('roadNetworkDetail', clampRoadNetworkDetail(Number(event.currentTarget.value)))
+                  updateSettings(
+                    "roadNetworkDetail",
+                    clampRoadNetworkDetail(Number(event.currentTarget.value)),
+                  )
                 }
                 onChange={(event) =>
-                  updateSettings('roadNetworkDetail', clampRoadNetworkDetail(Number(event.target.value)))
+                  updateSettings(
+                    "roadNetworkDetail",
+                    clampRoadNetworkDetail(Number(event.target.value)),
+                  )
                 }
               />
             </div>
 
             <div className="control-row">
               <div className="legend-title">Preview mode</div>
-              <div className="segmented" role="tablist" aria-label="Preview mode">
+              <div
+                className="segmented"
+                role="tablist"
+                aria-label="Preview mode"
+              >
                 <button
-                  className={`segment ${viewMode === 'chart' ? 'active' : ''}`}
+                  className={`segment ${viewMode === "chart" ? "active" : ""}`}
                   type="button"
-                  onClick={() => setViewMode('chart')}
+                  onClick={() => setViewMode("chart")}
                 >
                   Chart
                 </button>
                 <button
-                  className={`segment ${viewMode === 'stitched' ? 'active' : ''}`}
+                  className={`segment ${viewMode === "stitched" ? "active" : ""}`}
                   type="button"
-                  onClick={() => setViewMode('stitched')}
+                  onClick={() => setViewMode("stitched")}
                 >
                   Stitched
                 </button>
@@ -1281,7 +1529,11 @@ export function App() {
 
         <section className="sidebar-section">
           <div className="actions">
-            <button className="button primary" type="button" onClick={handlePngExport}>
+            <button
+              className="button primary"
+              type="button"
+              onClick={handlePngExport}
+            >
               Export PNG
             </button>
           </div>
@@ -1289,12 +1541,20 @@ export function App() {
           <p className="sidebar-attribution">
             <a href="https://openfreemap.org" target="_blank" rel="noreferrer">
               OpenFreeMap
-            </a>{' '}
-            <a href="https://www.openmaptiles.org/" target="_blank" rel="noreferrer">
+            </a>{" "}
+            <a
+              href="https://www.openmaptiles.org/"
+              target="_blank"
+              rel="noreferrer"
+            >
               &copy; OpenMapTiles
-            </a>{' '}
-            Data from{' '}
-            <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer">
+            </a>{" "}
+            Data from{" "}
+            <a
+              href="https://www.openstreetmap.org/copyright"
+              target="_blank"
+              rel="noreferrer"
+            >
               OpenStreetMap
             </a>
           </p>
@@ -1304,8 +1564,9 @@ export function App() {
       <main className="workspace">
         <div className="workspace-header">
           <p>
-            Scroll or double-click to zoom and drag the preview to pan. Use the grouped
-            legend below to hide individual areas, ways, or POIs from the stitched map.
+            Scroll or double-click to zoom and drag the preview to pan. Use the
+            grouped legend below to hide individual areas, ways, or POIs from
+            the stitched map.
           </p>
 
           <form
@@ -1322,15 +1583,35 @@ export function App() {
                 value={searchQuery}
                 onChange={(event) => setSearchQuery(event.target.value)}
               />
-              <button className="button" type="submit" disabled={searchStatus === 'loading'}>
-                {searchStatus === 'loading' ? 'Searching...' : 'Search'}
+              <button
+                className="button"
+                type="submit"
+                disabled={searchStatus === "loading"}
+              >
+                {searchStatus === "loading" ? "Searching..." : "Search"}
+              </button>
+              <button
+                className="button location-button"
+                type="button"
+                disabled={locationStatus === "loading"}
+                onClick={handleCurrentLocation}
+              >
+                {locationStatus === "loading"
+                  ? "Locating..."
+                  : "Current location"}
               </button>
             </div>
 
-            {searchError ? <div className="search-feedback">{searchError}</div> : null}
+            {searchError ? (
+              <div className="search-feedback">{searchError}</div>
+            ) : null}
 
             {searchResults.length ? (
-              <div className="search-results" role="list" aria-label="Search results">
+              <div
+                className="search-results"
+                role="list"
+                aria-label="Search results"
+              >
                 {searchResults.map((result) => (
                   <button
                     className="search-result"
@@ -1348,7 +1629,7 @@ export function App() {
         </div>
 
         <section
-          className={`preview-frame interactive ${isRenderingPreview ? 'rendering' : ''}`}
+          className={`preview-frame interactive ${isRenderingPreview ? "rendering" : ""}`}
           aria-label="Pattern preview"
           ref={previewFrameRef}
         >
@@ -1366,8 +1647,8 @@ export function App() {
               >
                 <canvas
                   className={`preview-canvas ${
-                    isDraggingPreview ? 'dragging' : 'draggable'
-                  } ${isRefreshingPreview ? 'updating' : ''}`}
+                    isDraggingPreview ? "dragging" : "draggable"
+                  } ${isRefreshingPreview ? "updating" : ""}`}
                   ref={canvasRef}
                   onPointerDown={handleCanvasPointerDown}
                   onPointerMove={handleCanvasPointerMove}
@@ -1378,7 +1659,9 @@ export function App() {
                 />
               </div>
             ) : (
-              <div className="empty-state">Preparing the first chart preview.</div>
+              <div className="empty-state">
+                Preparing the first chart preview.
+              </div>
             )}
           </div>
         </section>
@@ -1388,7 +1671,7 @@ export function App() {
           <div className="legend-band">
             {orderedLegend.map((entry) => (
               <button
-                className={`legend-item ${hiddenLegendEntries.has(legendEntryKey(entry)) ? 'inactive' : 'active'}`}
+                className={`legend-item ${hiddenLegendEntries.has(legendEntryKey(entry)) ? "inactive" : "active"}`}
                 key={legendEntryKey(entry)}
                 type="button"
                 aria-pressed={!hiddenLegendEntries.has(legendEntryKey(entry))}
@@ -1396,10 +1679,16 @@ export function App() {
               >
                 <div
                   className={`legend-swatch ${entry.mode}`}
-                  style={entry.mode === 'fill' ? { backgroundColor: entry.color } : { color: entry.color }}
+                  style={
+                    entry.mode === "fill"
+                      ? { backgroundColor: entry.color }
+                      : { color: entry.color }
+                  }
                   aria-hidden="true"
                 >
-                  <span className={`legend-symbol legend-symbol-${entry.mode}`} />
+                  <span
+                    className={`legend-symbol legend-symbol-${entry.mode}`}
+                  />
                 </div>
                 <div className="legend-meta">
                   <strong>{entry.label}</strong>
@@ -1407,7 +1696,9 @@ export function App() {
                 </div>
                 <div className="legend-usage">
                   <strong>{formatLegendUsage(entry.usage)}</strong>
-                  {hiddenLegendEntries.has(legendEntryKey(entry)) ? <span>Hidden</span> : null}
+                  {hiddenLegendEntries.has(legendEntryKey(entry)) ? (
+                    <span>Hidden</span>
+                  ) : null}
                 </div>
               </button>
             ))}
@@ -1427,19 +1718,28 @@ export function App() {
                 <div className="stat-label">Normalized map features</div>
               </div>
               <div className="stat-tile">
-                <div className="stat-value">{diagnostics.fetchedTileCount}/{diagnostics.tileCount}</div>
+                <div className="stat-value">
+                  {diagnostics.fetchedTileCount}/{diagnostics.tileCount}
+                </div>
                 <div className="stat-label">Fetched tiles</div>
               </div>
               <div className="stat-tile">
-                <div className="stat-value">z{diagnostics.zoom}/z{diagnostics.roadZoom ?? diagnostics.zoom}</div>
+                <div className="stat-value">
+                  z{diagnostics.zoom}/z
+                  {diagnostics.roadZoom ?? diagnostics.zoom}
+                </div>
                 <div className="stat-label">Area and road source zoom</div>
               </div>
               <div className="stat-tile">
-                <div className="stat-value">{diagnostics.totalDecodedFeatures}</div>
+                <div className="stat-value">
+                  {diagnostics.totalDecodedFeatures}
+                </div>
                 <div className="stat-label">Decoded raw features</div>
               </div>
               <div className="stat-tile">
-                <div className="stat-value">{diagnostics.layerStats.length}</div>
+                <div className="stat-value">
+                  {diagnostics.layerStats.length}
+                </div>
                 <div className="stat-label">Layers seen in fetched tiles</div>
               </div>
             </div>
@@ -1450,7 +1750,9 @@ export function App() {
                 <div className="stats-grid diagnostics-grid">
                   <div className="stat-tile">
                     <div className="stat-value">{curatedFeatureCount}</div>
-                    <div className="stat-label">Features kept for the pattern</div>
+                    <div className="stat-label">
+                      Features kept for the pattern
+                    </div>
                   </div>
                   <div className="stat-tile">
                     <div className="stat-value">{droppedFeatureCount}</div>
@@ -1458,9 +1760,12 @@ export function App() {
                   </div>
                   <div className="stat-tile">
                     <div className="stat-value">
-                      {curationStats.polygonsKept}/{curationStats.linesKept}/{curationStats.markersKept}
+                      {curationStats.polygonsKept}/{curationStats.linesKept}/
+                      {curationStats.markersKept}
                     </div>
-                    <div className="stat-label">Polygons, lines, markers kept</div>
+                    <div className="stat-label">
+                      Polygons, lines, markers kept
+                    </div>
                   </div>
                   <div className="stat-tile">
                     <div className="stat-value">
@@ -1470,15 +1775,25 @@ export function App() {
                         curationStats.droppedAdjacentPaths +
                         curationStats.droppedRoadBudget}
                     </div>
-                    <div className="stat-label">Tiny fills and skipped ways removed</div>
+                    <div className="stat-label">
+                      Tiny fills and skipped ways removed
+                    </div>
                   </div>
                   <div className="stat-tile">
-                    <div className="stat-value">{curationStats.roadsCollapsed}</div>
-                    <div className="stat-label">Parallel way candidates collapsed</div>
+                    <div className="stat-value">
+                      {curationStats.roadsCollapsed}
+                    </div>
+                    <div className="stat-label">
+                      Parallel way candidates collapsed
+                    </div>
                   </div>
                   <div className="stat-tile">
-                    <div className="stat-value">{curationStats.droppedRoadBudget}</div>
-                    <div className="stat-label">Road candidates outside detail budget</div>
+                    <div className="stat-value">
+                      {curationStats.droppedRoadBudget}
+                    </div>
+                    <div className="stat-label">
+                      Road candidates outside detail budget
+                    </div>
                   </div>
                 </div>
               </>
@@ -1489,8 +1804,13 @@ export function App() {
                 <div className="layer-item" key={layer.layerName}>
                   <strong>{layer.layerName}</strong>
                   <span>{layer.features} features</span>
-                  <span>{layer.polygons} polygons, {layer.lines} lines, {layer.points} points</span>
-                  <span>{layer.sampleKeys.join(', ') || 'No sampled properties'}</span>
+                  <span>
+                    {layer.polygons} polygons, {layer.lines} lines,{" "}
+                    {layer.points} points
+                  </span>
+                  <span>
+                    {layer.sampleKeys.join(", ") || "No sampled properties"}
+                  </span>
                 </div>
               ))}
             </div>

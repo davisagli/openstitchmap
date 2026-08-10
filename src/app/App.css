@@ -1,10 +1,13 @@
 .app-shell {
   display: grid;
   grid-template-columns: minmax(18rem, 23rem) minmax(0, 1fr);
+  width: 100%;
+  max-width: 100vw;
   min-height: 100vh;
 }
 
 .sidebar {
+  min-width: 0;
   padding: 2rem 1.4rem 1.6rem;
   background: rgba(251, 247, 238, 0.78);
   border-right: 1px solid rgba(16, 35, 29, 0.12);
@@ -227,7 +230,7 @@
 
 .search-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   gap: 0.65rem;
   align-items: center;
 }
@@ -366,6 +369,9 @@
   display: grid;
   grid-template-rows: auto auto auto;
   align-content: start;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
   min-height: 100vh;
   padding: 1.5rem 1.6rem;
   gap: 1rem;
@@ -383,7 +389,8 @@
 
 .preview-frame {
   min-height: 0;
-  width: max-content;
+  min-width: 0;
+  width: 100%;
   max-width: 100%;
   border-radius: 0;
   border: 1px solid rgba(16, 35, 29, 0.12);
@@ -421,7 +428,10 @@
 
 .preview-center {
   min-height: 100%;
+  min-width: 0;
+  width: 100%;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   place-items: center;
   position: relative;
 }
@@ -656,5 +666,25 @@
 
   .workspace-header {
     gap: 0.5rem;
+  }
+}
+
+@media (max-width: 560px) {
+  .sidebar,
+  .workspace {
+    padding-left: 1rem;
+    padding-right: 1rem;
+  }
+
+  .search-row {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+
+  .search-row .input {
+    grid-column: 1 / -1;
+  }
+
+  .location-button {
+    min-width: 0;
   }
 }

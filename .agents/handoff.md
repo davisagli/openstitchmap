@@ -9,7 +9,7 @@
   - PMTiles URL
   - Seattle-inspired local demo source
   but PMTiles/demo selection is intentionally hidden in the UI for now.
-- Main Seattle defaults still originate from `src/core/tiles/presets.ts`.
+- The default center still originates from `src/core/tiles/presets.ts`; the app now starts at zoom 11 independently of the preset zoom.
 - The app builds successfully with `npm run build`.
 
 ## Current product behavior
@@ -32,6 +32,10 @@
   - preview uses an overscanned canvas clipped by a viewport
   - the visible preview viewport is exactly the configured pattern width/height in cells, with the overscan canvas offset snapped to whole-cell boundaries so edge cells are not clipped mid-cell
   - transient CSS translate/scale is used during rerenders so pan/zoom does not snap back immediately
+  - the initial zoom is 11 and the zoom floor is 0, so the map can be viewed at regional and world scales
+- Place search is paired with a `Current location` button that uses browser geolocation to recenter the map while preserving the current zoom. Permission denial, timeout, unavailable-position, and unsupported-browser states are surfaced inline.
+- PNG exports append a readable attribution footer for OpenFreeMap, OpenMapTiles, and OpenStreetMap contributors.
+- The workspace and preview frame are width-constrained so the overscanned map canvas scrolls inside its own container instead of widening the mobile page. At narrow widths the search field takes its own row above the Search and Current location buttons.
 - The sidebar currently exposes only:
   - pattern width / height
   - stitched size, shown quietly in inches and centimeters under fabric count
@@ -56,7 +60,7 @@
 - `src/app/App.tsx`
   - Main UI and data-loading flow.
   - Implements slippy-map pan/zoom behavior.
-  - Handles search result dropdowns, outside-click dismissal, exact preview viewport sizing, and temporary wheel-zoom feedback.
+  - Handles search result dropdowns, current-location geolocation, outside-click dismissal, exact preview viewport sizing, and temporary wheel-zoom feedback.
   - Splits expensive work into prepared viewport data, compiled base assets, and visible pattern derivation.
   - Line/marker legend toggles now filter cached overlays; fill toggles recompile cells only.
 - `src/core/pattern/curateFeatures.ts`
@@ -81,6 +85,9 @@
   - Uses thick, slightly slack floss with restrained shadows for filled cross-stitch areas.
   - Keeps backstitch crisp and renders dimensional French-knot-style markers.
   - Renders 3/4 stitches with both dominant and adjacent-color floss.
+- `src/render/exporters.ts`
+  - Creates PNG downloads from the rendered canvas.
+  - Can composite a device-pixel-ratio-aware attribution footer beneath the exported image.
 - `src/core/palette.ts`
   - Fill / line / marker style definitions, including DMC floss codes used in the legend.
 
@@ -140,6 +147,7 @@
   - POI swatches resemble French knots
   - marker legend entries show DMC floss codes instead of the text `French knot`
 - Search results appear as a dropdown, close on outside click, and disappear after selecting a result.
+- The search/location controls and preview remain contained at mobile viewport widths instead of creating page-level horizontal overflow.
 
 ## What still looks rough
 
@@ -152,6 +160,7 @@
 - The workspace intro copy still says “Use the grouped legend below…” even though the explicit subgroup headings were removed. That copy is functionally fine but could be tightened.
 - The slippy map still works on a stitch-grid abstraction, not true continuous cartographic rendering, so motion can feel a little approximate when rerenders are fast/slow.
 - Wheel zoom has temporary canvas feedback and an idle commit path, but it is still a custom interaction that should be tested across mouse wheels and trackpads.
+- Current-location centering depends on browser geolocation permission and a secure context outside local development.
 - The realistic fabric/floss treatment is still experimental and may need tuning across
   palettes, pattern dimensions, and display pixel densities.
 - `chart -> stitched` is still noticeably slower than the reverse direction, so the draw path is now the next obvious bottleneck.
@@ -214,6 +223,7 @@
   - both preview modes use the same canvas and exact clipped viewport dimensions
   - preview panel has diagonal bars around the exact clipped pattern viewport
   - wheel zoom prevents page scroll over the preview, gives temporary scale feedback, commits on idle or threshold, and clamps feedback at the real min/max zoom
+  - initial source zoom is 11; browser testing confirmed zooming out below the previous floor by reaching z9
   - stitched mode uses the realistic woven-fabric/floss treatment
   - conservative 3/4 stitches appear only where neighboring cells corroborate the smoothed edge
   - legend order: fills, then ways, then POIs
@@ -225,12 +235,16 @@
   - rail and stream candidates are retained whole and snap near-touching same-kind endpoints
   - route-centerline extraction has been removed from the active road pipeline
   - parallel-corridor collapse keeps anchor geometry and preserves rendered connector stubs
+  - PNG export includes the OpenFreeMap/OpenMapTiles/OpenStreetMap attribution footer
+  - `Current location` appears beside Search and preserves the active zoom when recentering
+  - at a 390px viewport, the document stays 390px wide and the oversized preview scrolls within its frame
 - Build status:
   - `npm run build` passed
-- `git diff --check` passed after the latest cleanup/UI interaction pass.
+- `git diff --check` passed after the map navigation, export attribution, and mobile layout pass.
 
 ## Recent commits
 
+- `1804f61` - `Clean up road pipeline and preview UI`
 - `2bdaab4` - `Use source zoom for road detail`
 - `646020d` - `Refine road network curation`
 - `0f6dd8b` - `Add double-click zoom and preview attribution`
