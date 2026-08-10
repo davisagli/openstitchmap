@@ -20,7 +20,8 @@ piece.
 
 ## Running locally
 
-OpenStitchMap requires Node.js 20 or newer and npm.
+OpenStitchMap requires Node.js 20.19 or newer (or Node.js 22.12 or newer) and
+npm.
 
 ```sh
 npm install
