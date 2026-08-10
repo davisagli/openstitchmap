@@ -1,5 +1,4 @@
 import type { BBox, MapFeature } from '../osm';
-import { sampleMap } from '../sampleMap';
 
 export interface TileRequest {
   bbox?: BBox;
@@ -50,27 +49,4 @@ export interface TileSource {
   id: string;
   label: string;
   load(request: TileRequest): Promise<LoadedSourceData>;
-}
-
-export class DemoTileSource implements TileSource {
-  id = 'demo';
-  label = 'Seattle-inspired demo';
-
-  async load(_request: TileRequest): Promise<LoadedSourceData> {
-    return {
-      id: sampleMap.id,
-      label: this.label,
-      title: sampleMap.name,
-      bbox: sampleMap.bbox,
-      features: sampleMap.features,
-      diagnostics: {
-        zoom: _request.zoomHint,
-        roadZoom: _request.roadZoomHint ?? _request.zoomHint,
-        tileCount: 0,
-        fetchedTileCount: 0,
-        totalDecodedFeatures: sampleMap.features.length,
-        layerStats: [],
-      },
-    };
-  }
 }

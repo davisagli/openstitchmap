@@ -15,7 +15,6 @@ import type { BBox, MapFeature, Position } from "../core/osm";
 import type { LoadedSourceData } from "../core/tiles/tileSource";
 import { HostedVectorTileSource } from "../core/tiles/hostedVectorSource";
 import { lonLatToWorld, worldToLonLat } from "../core/tiles/mercator";
-import { areaPresets } from "../core/tiles/presets";
 import {
   buildPatternDocument,
   classifyLine,
@@ -63,7 +62,6 @@ interface Settings {
   detailLevel: DetailLevel;
   roadNetworkDetail: number;
   zoomHint: number;
-  pmtilesUrl: string;
 }
 
 interface PreparedPatternVariant {
@@ -98,7 +96,7 @@ interface SearchResult {
 }
 
 const HOSTED_TILEJSON_URL = "https://tiles.openfreemap.org/planet";
-const defaultAreaPreset = areaPresets[0];
+const DEFAULT_MAP_CENTER = { lon: -122.3428, lat: 47.6076 };
 const SLIPPY_VIEW_HEIGHT_TILES = 1;
 const PREVIEW_OVERSCAN_FACTOR = 1.45;
 const FABRIC_COUNTS: FabricCount[] = [14, 16, 18];
@@ -115,14 +113,13 @@ const TILE_ATTRIBUTION =
   "OpenFreeMap · © OpenMapTiles · Data © OpenStreetMap contributors";
 
 const defaultSettings: Settings = {
-  center: defaultAreaPreset.center,
+  center: DEFAULT_MAP_CENTER,
   width: 96,
   height: 72,
   fabricCount: 14,
   detailLevel: "high",
   roadNetworkDetail: 1,
   zoomHint: DEFAULT_MAP_ZOOM,
-  pmtilesUrl: "",
 };
 
 function clampDimension(value: number, fallback: number): number {

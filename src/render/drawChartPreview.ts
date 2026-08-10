@@ -54,24 +54,6 @@ function drawCellSymbol(
   context.fillText(symbol, x, y + 0.5);
 }
 
-function cornerPoint(
-  left: number,
-  top: number,
-  size: number,
-  corner: PatternCellCorner,
-): { x: number; y: number } {
-  switch (corner) {
-    case 'topLeft':
-      return { x: left, y: top };
-    case 'topRight':
-      return { x: left + size, y: top };
-    case 'bottomLeft':
-      return { x: left, y: top + size };
-    case 'bottomRight':
-      return { x: left + size, y: top + size };
-  }
-}
-
 function triangleVertices(
   left: number,
   top: number,

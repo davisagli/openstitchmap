@@ -781,21 +781,3 @@ export function buildPatternDocument(
     legend: buildLegend(options.cells, options.backstitches, options.markers),
   };
 }
-
-export function compilePattern(
-  features: MapFeature[],
-  options: CompilePatternOptions,
-): PatternDocument {
-  const cells = compilePatternCells(features, options);
-  const overlays = compilePatternOverlays(features, options);
-
-  return buildPatternDocument({
-    title: options.title,
-    width: options.width,
-    height: options.height,
-    bbox: options.bbox,
-    cells,
-    backstitches: overlays.backstitches,
-    markers: overlays.markers,
-  });
-}

@@ -2,6 +2,7 @@
   "name": "openstitchmap",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -11,7 +12,6 @@
   "dependencies": {
     "@mapbox/vector-tile": "^3.0.0",
     "pbf": "^5.1.0",
-    "pmtiles": "^4.4.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },
