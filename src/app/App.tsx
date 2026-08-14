@@ -36,6 +36,7 @@ import {
 import { drawChartPreview } from "../render/drawChartPreview";
 import { drawStitchPreview } from "../render/drawStitchPreview";
 import { exportCanvasPng } from "../render/exporters";
+import { updateFaviconFromCanvas } from "../render/updateFavicon";
 
 type ViewMode = "chart" | "stitched";
 type FabricCount = 14 | 16 | 18;
@@ -970,6 +971,21 @@ export function App() {
     } else {
       drawStitchPreview(canvasRef.current, previewPattern, cellSize);
     }
+
+    updateFaviconFromCanvas(canvasRef.current, {
+      width: pattern.width * cellSize,
+      height: pattern.height * cellSize,
+      canvasOffsetX: snappedPreviewOffset(
+        previewPattern.width,
+        pattern.width,
+        cellSize,
+      ),
+      canvasOffsetY: snappedPreviewOffset(
+        previewPattern.height,
+        pattern.height,
+        cellSize,
+      ),
+    });
 
     setIsRefreshingPreview(false);
     setPreviewMotion((current) => (current ? null : current));
