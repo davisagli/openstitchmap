@@ -9,6 +9,7 @@ piece.
 
 - Search for a place or use your current location.
 - Pan and zoom an interactive map-derived pattern preview.
+- Share the current map position and pattern settings by copying the URL.
 - Set the pattern dimensions and calculate the finished size for common fabric
   counts.
 - Adjust how much of the road network is included.

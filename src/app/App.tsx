@@ -123,6 +123,7 @@ const WHEEL_ZOOM_FEEDBACK_MAX_SCALE = 0.16;
 const DEFAULT_MAP_ZOOM = 11;
 const MIN_MAP_ZOOM = 0;
 const MAX_MAP_ZOOM = 16;
+const MAX_MERCATOR_LATITUDE = 85.05112878;
 const TILE_ATTRIBUTION =
   "OpenFreeMap · © OpenMapTiles · Data © OpenStreetMap contributors";
 
@@ -136,12 +137,118 @@ const defaultSettings: Settings = {
   zoomHint: DEFAULT_MAP_ZOOM,
 };
 
+interface UrlState {
+  settings: Settings;
+  viewMode: ViewMode;
+  hiddenLegendEntries: Set<string>;
+}
+
 function clampDimension(value: number, fallback: number): number {
   if (Number.isNaN(value)) {
     return fallback;
   }
 
   return Math.min(180, Math.max(36, Math.round(value)));
+}
+
+function numberParam(
+  params: URLSearchParams,
+  name: string,
+  fallback: number,
+): number {
+  const rawValue = params.get(name);
+  if (rawValue === null || rawValue.trim() === "") {
+    return fallback;
+  }
+
+  const value = Number(rawValue);
+  return Number.isFinite(value) ? value : fallback;
+}
+
+function readUrlState(search: string): UrlState {
+  const params = new URLSearchParams(search);
+  const fabricCount = numberParam(
+    params,
+    "fabric",
+    defaultSettings.fabricCount,
+  );
+  const detailLevel = params.get("detail");
+  const viewMode = params.get("view");
+
+  return {
+    settings: {
+      center: {
+        lat: Math.min(
+          MAX_MERCATOR_LATITUDE,
+          Math.max(
+            -MAX_MERCATOR_LATITUDE,
+            numberParam(params, "lat", defaultSettings.center.lat),
+          ),
+        ),
+        lon: Math.min(
+          180,
+          Math.max(
+            -180,
+            numberParam(params, "lon", defaultSettings.center.lon),
+          ),
+        ),
+      },
+      width: clampDimension(
+        numberParam(params, "width", defaultSettings.width),
+        defaultSettings.width,
+      ),
+      height: clampDimension(
+        numberParam(params, "height", defaultSettings.height),
+        defaultSettings.height,
+      ),
+      fabricCount: FABRIC_COUNTS.includes(fabricCount as FabricCount)
+        ? (fabricCount as FabricCount)
+        : defaultSettings.fabricCount,
+      detailLevel:
+        detailLevel === "low" ||
+        detailLevel === "medium" ||
+        detailLevel === "high"
+          ? detailLevel
+          : defaultSettings.detailLevel,
+      roadNetworkDetail: clampRoadNetworkDetail(
+        numberParam(
+          params,
+          "roadDetail",
+          defaultSettings.roadNetworkDetail,
+        ),
+      ),
+      zoomHint: clampZoom(
+        numberParam(params, "zoom", defaultSettings.zoomHint),
+      ),
+    },
+    viewMode:
+      viewMode === "chart" || viewMode === "stitched" ? viewMode : "chart",
+    hiddenLegendEntries: new Set(
+      params.getAll("hidden").filter((key) => key.trim().length > 0),
+    ),
+  };
+}
+
+function writeUrlState({
+  settings,
+  viewMode,
+  hiddenLegendEntries,
+}: UrlState) {
+  const url = new URL(window.location.href);
+  url.searchParams.set("lat", settings.center.lat.toFixed(6));
+  url.searchParams.set("lon", settings.center.lon.toFixed(6));
+  url.searchParams.set("zoom", String(settings.zoomHint));
+  url.searchParams.set("width", String(settings.width));
+  url.searchParams.set("height", String(settings.height));
+  url.searchParams.set("fabric", String(settings.fabricCount));
+  url.searchParams.set("detail", settings.detailLevel);
+  url.searchParams.set("roadDetail", String(settings.roadNetworkDetail));
+  url.searchParams.set("view", viewMode);
+  url.searchParams.delete("hidden");
+  Array.from(hiddenLegendEntries)
+    .sort()
+    .forEach((key) => url.searchParams.append("hidden", key));
+  window.history.replaceState(window.history.state, "", url);
 }
 
 function inches(stitches: number, fabricCount: number): string {
@@ -537,6 +644,9 @@ function normalizeSearchResult(value: unknown): SearchResult | null {
 }
 
 export function App() {
+  const [initialUrlState] = useState(() =>
+    readUrlState(window.location.search),
+  );
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const previewFrameRef = useRef<HTMLElement | null>(null);
   const previewViewportRef = useRef<HTMLDivElement | null>(null);
@@ -553,12 +663,14 @@ export function App() {
   const wheelZoomDeltaRef = useRef(0);
   const wheelZoomFeedbackRef = useRef<WheelZoomFeedback | null>(null);
   const wheelZoomFeedbackResetRef = useRef<number | null>(null);
-  const [viewMode, setViewMode] = useState<ViewMode>("chart");
+  const [viewMode, setViewMode] = useState<ViewMode>(initialUrlState.viewMode);
   const [isDraggingPreview, setIsDraggingPreview] = useState(false);
   const [previewMotion, setPreviewMotion] = useState<PreviewMotion | null>(
     null,
   );
-  const [settings, setSettings] = useState<Settings>(defaultSettings);
+  const [settings, setSettings] = useState<Settings>(
+    initialUrlState.settings,
+  );
   const deferredSettings = useDeferredValue(settings);
   const [sourceData, setSourceData] = useState<LoadedSourceData | null>(null);
   const [preparedViewport, setPreparedViewport] =
@@ -568,7 +680,7 @@ export function App() {
   const [curation, setCuration] = useState<CurateFeaturesResult | null>(null);
   const [availableLegend, setAvailableLegend] = useState<LegendEntry[]>([]);
   const [hiddenLegendEntries, setHiddenLegendEntries] = useState<Set<string>>(
-    new Set(),
+    initialUrlState.hiddenLegendEntries,
   );
   const [pattern, setPattern] = useState<PatternDocument | null>(null);
   const [previewPattern, setPreviewPattern] = useState<PatternDocument | null>(
@@ -586,6 +698,26 @@ export function App() {
   const [locationStatus, setLocationStatus] = useState<"idle" | "loading">(
     "idle",
   );
+
+  useEffect(() => {
+    function restoreUrlState() {
+      const urlState = readUrlState(window.location.search);
+      setSettings(urlState.settings);
+      setViewMode(urlState.viewMode);
+      setHiddenLegendEntries(urlState.hiddenLegendEntries);
+      setPreviewMotion(null);
+      setSearchResults([]);
+      setSearchError(null);
+      setSearchStatus("idle");
+    }
+
+    window.addEventListener("popstate", restoreUrlState);
+    return () => window.removeEventListener("popstate", restoreUrlState);
+  }, []);
+
+  useEffect(() => {
+    writeUrlState({ settings, viewMode, hiddenLegendEntries });
+  }, [hiddenLegendEntries, settings, viewMode]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1701,6 +1833,14 @@ export function App() {
           </div>
 
           <p className="sidebar-attribution">
+            <a
+              href="https://github.com/davisagli/openstitchmap"
+              target="_blank"
+              rel="noreferrer"
+            >
+              View source on GitHub
+            </a>
+            <br />
             <a href="https://openfreemap.org" target="_blank" rel="noreferrer">
               OpenFreeMap
             </a>{" "}

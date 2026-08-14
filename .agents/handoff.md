@@ -35,7 +35,9 @@
   - transient CSS translate/scale is used during rerenders so pan/zoom does not snap back immediately
   - the initial zoom is 11 and the zoom floor is 0, so the map can be viewed at regional and world scales
 - Place search is paired with a `Current location` button that uses browser geolocation to recenter the map while preserving the current zoom. Permission denial, timeout, unavailable-position, and unsupported-browser states are surfaced inline.
+- The current map and pattern configuration is shareable through the URL query string. Latitude, longitude, zoom, dimensions, fabric count, stitch detail, road detail, preview mode, and hidden legend entries are restored on load and browser navigation; updates use `history.replaceState` so pan/zoom gestures do not flood browser history.
 - PNG exports append a readable attribution footer for OpenFreeMap, OpenMapTiles, and OpenStreetMap contributors.
+- The sidebar attribution footer includes a link to the public GitHub repository.
 - The workspace and preview frame are width-constrained so the overscanned map canvas scrolls inside its own container instead of widening the mobile page. At narrow widths the search field takes its own row above the Search and Current location buttons.
 - The sidebar currently exposes only:
   - pattern width / height
@@ -61,6 +63,7 @@
 - `src/app/App.tsx`
   - Main UI and data-loading flow.
   - Implements slippy-map pan/zoom behavior.
+  - Parses, validates, restores, and continuously writes shareable query-string state.
   - Handles search result dropdowns, current-location geolocation, outside-click dismissal, exact preview viewport sizing, and temporary wheel-zoom feedback.
   - Splits expensive work into prepared viewport data, compiled base assets, and visible pattern derivation.
   - Line/marker legend toggles now filter cached overlays; fill toggles recompile cells only.
@@ -148,6 +151,7 @@
   - POI swatches resemble French knots
   - marker legend entries show DMC floss codes instead of the text `French knot`
 - Search results appear as a dropdown, close on outside click, and disappear after selecting a result.
+- Copying the browser URL now preserves the viewed location and active pattern/legend settings without adding a separate sharing workflow.
 - The search/location controls and preview remain contained at mobile viewport widths instead of creating page-level horizontal overflow.
 
 ## What still looks rough
@@ -240,6 +244,8 @@
   - parallel-corridor collapse keeps anchor geometry and preserves rendered connector stubs
   - PNG export includes the OpenFreeMap/OpenMapTiles/OpenStreetMap attribution footer
   - `Current location` appears beside Search and preserves the active zoom when recentering
+  - query-string state was observed updating during live map inspection, including a non-default center and z15 zoom
+  - the sidebar footer links to `https://github.com/davisagli/openstitchmap`
   - at a 390px viewport, the document stays 390px wide and the oversized preview scrolls within its frame
 - Build status:
   - `npm run build` passed
