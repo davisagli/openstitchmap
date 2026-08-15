@@ -86,7 +86,7 @@ interface PreparedPatternVariant {
 
 interface PreparedViewportData {
   actual: PreparedPatternVariant;
-  preview: PreparedPatternVariant;
+  renderRequestKey: string;
 }
 
 interface CompiledPatternVariant extends PreparedPatternVariant {
@@ -99,6 +99,7 @@ interface CompiledViewportData {
   actual: CompiledPatternVariant;
   preview: CompiledPatternVariant;
   availableLegend: LegendEntry[];
+  renderRequestKey: string;
 }
 
 interface SearchResult {
@@ -113,7 +114,10 @@ interface SearchResult {
 const HOSTED_TILEJSON_URL = "https://tiles.openfreemap.org/planet";
 const DEFAULT_MAP_CENTER = { lon: -122.3428, lat: 47.6076 };
 const SLIPPY_VIEW_HEIGHT_TILES = 1;
-const PREVIEW_OVERSCAN_FACTOR = 1.45;
+// Keep a full viewport of rendered map outside every edge so a complete pan
+// gesture stays covered while the newly centered preview is being prepared.
+const PREVIEW_OVERSCAN_FACTOR = 3;
+const PREVIEW_CANVAS_PADDING = 24;
 const FABRIC_COUNTS: FabricCount[] = [14, 16, 18];
 const NOMINATIM_SEARCH_URL = "https://nominatim.openstreetmap.org/search";
 const HOSTED_SOURCE_MAX_ZOOM = 14;
@@ -127,6 +131,21 @@ const MAX_MAP_ZOOM = 16;
 const MAX_MERCATOR_LATITUDE = 85.05112878;
 const TILE_ATTRIBUTION =
   "OpenFreeMap · © OpenMapTiles · Data © OpenStreetMap contributors";
+
+function tileSourceRequestKey(settings: Settings): string {
+  return JSON.stringify([
+    settings.center.lon,
+    settings.center.lat,
+    settings.width,
+    settings.height,
+    settings.zoomHint,
+    settings.roadNetworkDetail,
+  ]);
+}
+
+function previewRenderRequestKey(settings: Settings): string {
+  return `${tileSourceRequestKey(settings)}:${settings.detailLevel}`;
+}
 
 const defaultSettings: Settings = {
   center: DEFAULT_MAP_CENTER,
@@ -268,13 +287,21 @@ function formatLegendUsage(usage: number): string {
   return Math.round(usage).toLocaleString();
 }
 
+function previewStitchInset(
+  previewStitches: number,
+  patternStitches: number,
+): number {
+  return Math.max(0, Math.round((previewStitches - patternStitches) / 2));
+}
+
 function snappedPreviewOffset(
   previewStitches: number,
   patternStitches: number,
   cellSize: number,
 ): number {
   return (
-    -Math.max(0, Math.round((previewStitches - patternStitches) / 2)) * cellSize
+    -PREVIEW_CANVAS_PADDING -
+    previewStitchInset(previewStitches, patternStitches) * cellSize
   );
 }
 
@@ -364,12 +391,11 @@ function viewportBBox(
   zoom: number,
   width: number,
   height: number,
-  overscanFactor = 1,
 ): BBox {
   const aspectRatio = Math.max(0.5, width / Math.max(1, height));
   const world = lonLatToWorld(center.lon, center.lat, zoom);
   const worldScale = 2 ** zoom;
-  const spanY = SLIPPY_VIEW_HEIGHT_TILES * overscanFactor;
+  const spanY = SLIPPY_VIEW_HEIGHT_TILES;
   const spanX = spanY * aspectRatio;
   const minX = Math.max(0, Math.min(worldScale, world.x - spanX / 2));
   const maxX = Math.max(0, Math.min(worldScale, world.x + spanX / 2));
@@ -383,6 +409,20 @@ function viewportBBox(
     minLat: southEast.lat,
     maxLon: southEast.lon,
     maxLat: northWest.lat,
+  };
+}
+
+function expandedPreviewBBox(viewport: BBox, factor: number): BBox {
+  const longitudePadding =
+    ((viewport.maxLon - viewport.minLon) * (factor - 1)) / 2;
+  const latitudePadding =
+    ((viewport.maxLat - viewport.minLat) * (factor - 1)) / 2;
+
+  return {
+    minLon: viewport.minLon - longitudePadding,
+    minLat: viewport.minLat - latitudePadding,
+    maxLon: viewport.maxLon + longitudePadding,
+    maxLat: viewport.maxLat + latitudePadding,
   };
 }
 
@@ -507,6 +547,35 @@ function filterMarkersByLegendSelection(
   return markers.filter(
     (marker) => !hiddenEntries.has(`marker:${marker.kind}`),
   );
+}
+
+function compilePreparedPattern(
+  variant: PreparedPatternVariant,
+): CompiledPatternVariant {
+  const baseCells = compilePatternCells(
+    variant.curation.features,
+    variant.options,
+  );
+  const baseOverlays = compilePatternOverlays(
+    variant.curation.features,
+    variant.options,
+  );
+  const basePattern = buildPatternDocument({
+    title: variant.options.title,
+    width: variant.options.width,
+    height: variant.options.height,
+    bbox: variant.options.bbox,
+    cells: baseCells,
+    backstitches: baseOverlays.backstitches,
+    markers: baseOverlays.markers,
+  });
+
+  return {
+    ...variant,
+    baseCells,
+    baseOverlays,
+    basePattern,
+  };
 }
 
 function buildVisiblePattern(
@@ -664,6 +733,7 @@ export function App() {
   const wheelZoomDeltaRef = useRef(0);
   const wheelZoomFeedbackRef = useRef<WheelZoomFeedback | null>(null);
   const wheelZoomFeedbackResetRef = useRef<number | null>(null);
+  const loadedTileRequestKeyRef = useRef<string | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>(initialUrlState.viewMode);
   const [isDraggingPreview, setIsDraggingPreview] = useState(false);
   const [previewMotion, setPreviewMotion] = useState<PreviewMotion | null>(
@@ -687,6 +757,9 @@ export function App() {
   const [previewPattern, setPreviewPattern] = useState<PatternDocument | null>(
     null,
   );
+  const [renderedForegroundKey, setRenderedForegroundKey] = useState<
+    string | null
+  >(null);
   const [sourceError, setSourceError] = useState<string | null>(null);
   const [isRefreshingPreview, setIsRefreshingPreview] = useState(true);
   const [isPending, startTransition] = useTransition();
@@ -722,6 +795,7 @@ export function App() {
 
   useEffect(() => {
     let cancelled = false;
+    const requestKey = tileSourceRequestKey(deferredSettings);
     const source = new HostedVectorTileSource(
       HOSTED_TILEJSON_URL,
       "OpenFreeMap",
@@ -733,6 +807,7 @@ export function App() {
 
     setSourceError(null);
     setIsRefreshingPreview(true);
+    loadedTileRequestKeyRef.current = null;
 
     source
       .load({
@@ -741,7 +816,6 @@ export function App() {
           deferredSettings.zoomHint,
           deferredSettings.width,
           deferredSettings.height,
-          PREVIEW_OVERSCAN_FACTOR,
         ),
         center: deferredSettings.center,
         zoomHint: deferredSettings.zoomHint,
@@ -752,6 +826,7 @@ export function App() {
           return;
         }
 
+        loadedTileRequestKeyRef.current = requestKey;
         startTransition(() => {
           setSourceData(features);
         });
@@ -765,6 +840,7 @@ export function App() {
           error instanceof Error
             ? error.message
             : "Unable to load the selected source.";
+        loadedTileRequestKeyRef.current = null;
         startTransition(() => {
           setSourceData(null);
           setPreparedViewport(null);
@@ -790,7 +866,11 @@ export function App() {
   ]);
 
   useEffect(() => {
-    if (!sourceData) {
+    const tileRequestKey = tileSourceRequestKey(deferredSettings);
+    if (
+      !sourceData ||
+      loadedTileRequestKeyRef.current !== tileRequestKey
+    ) {
       return;
     }
 
@@ -802,28 +882,9 @@ export function App() {
       deferredSettings.width,
       deferredSettings.height,
     );
-    const previewViewportBBox = viewportBBox(
-      deferredSettings.center,
-      deferredSettings.zoomHint,
-      deferredSettings.width,
-      deferredSettings.height,
-      PREVIEW_OVERSCAN_FACTOR,
-    );
-    const previewWidth = Math.max(
-      deferredSettings.width + 8,
-      Math.round(deferredSettings.width * PREVIEW_OVERSCAN_FACTOR),
-    );
-    const previewHeight = Math.max(
-      deferredSettings.height + 8,
-      Math.round(deferredSettings.height * PREVIEW_OVERSCAN_FACTOR),
-    );
     const actualFeatures = filterFeaturesToBBox(
       sourceData.features,
       currentViewportBBox,
-    );
-    const previewFeatures = filterFeaturesToBBox(
-      sourceData.features,
-      previewViewportBBox,
     );
 
     const actual = {
@@ -843,27 +904,13 @@ export function App() {
         includeMinorRoads: true,
       },
     };
-    const preview = {
-      curation: curateFeatures(previewFeatures, {
-        bbox: previewViewportBBox,
-        width: previewWidth,
-        height: previewHeight,
-        detailLevel: deferredSettings.detailLevel,
-        includeMinorRoads: true,
-        roadNetworkDetail: deferredSettings.roadNetworkDetail,
-      }),
-      options: {
-        title: `${sourceData.title} Preview`,
-        width: previewWidth,
-        height: previewHeight,
-        bbox: previewViewportBBox,
-        includeMinorRoads: true,
-      },
-    };
 
     startTransition(() => {
       setCuration(actual.curation);
-      setPreparedViewport({ actual, preview });
+      setPreparedViewport({
+        actual,
+        renderRequestKey: previewRenderRequestKey(deferredSettings),
+      });
     });
   }, [
     deferredSettings.detailLevel,
@@ -878,61 +925,18 @@ export function App() {
       return;
     }
 
-    const actualBaseCells = compilePatternCells(
-      preparedViewport.actual.curation.features,
-      preparedViewport.actual.options,
+    const compiledActual = compilePreparedPattern(preparedViewport.actual);
+    const nextAvailableLegend = compiledActual.basePattern.legend.filter(
+      isInteractiveLegendEntry,
     );
-    const actualBaseOverlays = compilePatternOverlays(
-      preparedViewport.actual.curation.features,
-      preparedViewport.actual.options,
-    );
-    const actualBasePattern = buildPatternDocument({
-      title: preparedViewport.actual.options.title,
-      width: preparedViewport.actual.options.width,
-      height: preparedViewport.actual.options.height,
-      bbox: preparedViewport.actual.options.bbox,
-      cells: actualBaseCells,
-      backstitches: actualBaseOverlays.backstitches,
-      markers: actualBaseOverlays.markers,
-    });
-    const previewBaseCells = compilePatternCells(
-      preparedViewport.preview.curation.features,
-      preparedViewport.preview.options,
-    );
-    const previewBaseOverlays = compilePatternOverlays(
-      preparedViewport.preview.curation.features,
-      preparedViewport.preview.options,
-    );
-    const previewBasePattern = buildPatternDocument({
-      title: preparedViewport.preview.options.title,
-      width: preparedViewport.preview.options.width,
-      height: preparedViewport.preview.options.height,
-      bbox: preparedViewport.preview.options.bbox,
-      cells: previewBaseCells,
-      backstitches: previewBaseOverlays.backstitches,
-      markers: previewBaseOverlays.markers,
-    });
 
     startTransition(() => {
-      setAvailableLegend(
-        actualBasePattern.legend.filter(isInteractiveLegendEntry),
-      );
+      setAvailableLegend(nextAvailableLegend);
       setCompiledViewport({
-        actual: {
-          ...preparedViewport.actual,
-          baseCells: actualBaseCells,
-          baseOverlays: actualBaseOverlays,
-          basePattern: actualBasePattern,
-        },
-        preview: {
-          ...preparedViewport.preview,
-          baseCells: previewBaseCells,
-          baseOverlays: previewBaseOverlays,
-          basePattern: previewBasePattern,
-        },
-        availableLegend: actualBasePattern.legend.filter(
-          isInteractiveLegendEntry,
-        ),
+        actual: compiledActual,
+        preview: compiledActual,
+        availableLegend: nextAvailableLegend,
+        renderRequestKey: preparedViewport.renderRequestKey,
       });
     });
   }, [preparedViewport]);
@@ -967,7 +971,10 @@ export function App() {
     const cellSize = Math.max(7, Math.min(14, Math.floor(860 / pattern.width)));
 
     if (viewMode === "chart") {
-      drawChartPreview(canvasRef.current, previewPattern, cellSize);
+      drawChartPreview(canvasRef.current, previewPattern, cellSize, {
+        x: previewStitchInset(previewPattern.width, pattern.width) % 10,
+        y: previewStitchInset(previewPattern.height, pattern.height) % 10,
+      });
     } else {
       drawStitchPreview(canvasRef.current, previewPattern, cellSize);
     }
@@ -989,7 +996,119 @@ export function App() {
 
     setIsRefreshingPreview(false);
     setPreviewMotion((current) => (current ? null : current));
+    if (
+      previewPattern.width === pattern.width &&
+      previewPattern.height === pattern.height
+    ) {
+      setRenderedForegroundKey(compiledViewport?.renderRequestKey ?? null);
+    }
   }, [pattern, previewPattern, viewMode]);
+
+  useEffect(() => {
+    const tileRequestKey = tileSourceRequestKey(deferredSettings);
+    const renderRequestKey = previewRenderRequestKey(deferredSettings);
+    if (
+      !sourceData ||
+      loadedTileRequestKeyRef.current !== tileRequestKey ||
+      renderedForegroundKey !== renderRequestKey
+    ) {
+      return;
+    }
+
+    let cancelled = false;
+    const source = new HostedVectorTileSource(
+      HOSTED_TILEJSON_URL,
+      "OpenFreeMap",
+    );
+    const roadZoomHint = roadSourceZoom(
+      deferredSettings.zoomHint,
+      deferredSettings.roadNetworkDetail,
+    );
+    const currentViewportBBox = viewportBBox(
+      deferredSettings.center,
+      deferredSettings.zoomHint,
+      deferredSettings.width,
+      deferredSettings.height,
+    );
+    // Pattern projection is linear in longitude/latitude, so derive overscan
+    // from the foreground box in that same coordinate space. This makes the
+    // center third pixel-identical in position and scale to the foreground.
+    const previewViewportBBox = expandedPreviewBBox(
+      currentViewportBBox,
+      PREVIEW_OVERSCAN_FACTOR,
+    );
+    const previewWidth = Math.max(
+      deferredSettings.width + 8,
+      Math.round(deferredSettings.width * PREVIEW_OVERSCAN_FACTOR),
+    );
+    const previewHeight = Math.max(
+      deferredSettings.height + 8,
+      Math.round(deferredSettings.height * PREVIEW_OVERSCAN_FACTOR),
+    );
+
+    source
+      .load({
+        bbox: previewViewportBBox,
+        center: deferredSettings.center,
+        zoomHint: deferredSettings.zoomHint,
+        roadZoomHint,
+      })
+      .then((previewSourceData) => {
+        if (cancelled) {
+          return;
+        }
+
+        const previewFeatures = filterFeaturesToBBox(
+          previewSourceData.features,
+          previewViewportBBox,
+        );
+        const compiledPreview = compilePreparedPattern({
+          curation: curateFeatures(previewFeatures, {
+            bbox: previewViewportBBox,
+            width: previewWidth,
+            height: previewHeight,
+            detailLevel: deferredSettings.detailLevel,
+            includeMinorRoads: true,
+            roadNetworkDetail: deferredSettings.roadNetworkDetail,
+          }),
+          options: {
+            title: `${previewSourceData.title} Preview`,
+            width: previewWidth,
+            height: previewHeight,
+            bbox: previewViewportBBox,
+            includeMinorRoads: true,
+          },
+        });
+
+        if (cancelled) {
+          return;
+        }
+
+        startTransition(() => {
+          setCompiledViewport((current) =>
+            current?.renderRequestKey === renderRequestKey
+              ? { ...current, preview: compiledPreview }
+              : current,
+          );
+        });
+      })
+      .catch(() => {
+        // The visible pattern is already usable; retain it if overscan fails.
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    deferredSettings.center,
+    deferredSettings.detailLevel,
+    deferredSettings.height,
+    deferredSettings.roadNetworkDetail,
+    deferredSettings.width,
+    deferredSettings.zoomHint,
+    renderedForegroundKey,
+    sourceData,
+  ]);
 
   useEffect(
     () => () => {

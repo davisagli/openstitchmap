@@ -114,6 +114,7 @@ export function drawChartPreview(
   canvas: HTMLCanvasElement,
   pattern: PatternDocument,
   cellSize: number,
+  majorGridPhase: { x: number; y: number } = { x: 0, y: 0 },
 ): void {
   const padding = 24;
   const width = pattern.width * cellSize + padding * 2;
@@ -190,13 +191,13 @@ export function drawChartPreview(
 
   context.strokeStyle = 'rgba(16, 35, 29, 0.35)';
   context.lineWidth = 1.5;
-  for (let x = 0; x <= pattern.width; x += 10) {
+  for (let x = majorGridPhase.x; x <= pattern.width; x += 10) {
     context.beginPath();
     context.moveTo(x * cellSize, 0);
     context.lineTo(x * cellSize, pattern.height * cellSize);
     context.stroke();
   }
-  for (let y = 0; y <= pattern.height; y += 10) {
+  for (let y = majorGridPhase.y; y <= pattern.height; y += 10) {
     context.beginPath();
     context.moveTo(0, y * cellSize);
     context.lineTo(pattern.width * cellSize, y * cellSize);
