@@ -29,6 +29,7 @@ const SUPPORTED_LAYERS = new Set([
   'landcover',
   'park',
   'natural',
+  'glacier',
   'building',
   'buildings',
   'roads',
@@ -163,9 +164,16 @@ function buildNormalizedTags(
     }
   }
 
-  if (normalizedLayer === 'landuse' || normalizedLayer === 'landcover' || normalizedLayer === 'park') {
+  if (
+    normalizedLayer === 'landuse' ||
+    normalizedLayer === 'landcover' ||
+    normalizedLayer === 'park' ||
+    normalizedLayer === 'glacier'
+  ) {
     const areaKind = (kind ?? '').toLowerCase();
-    if (
+    if (normalizedLayer === 'glacier' || ['glacier', 'ice', 'snow', 'snowfield'].includes(areaKind)) {
+      tags.natural = tags.natural ?? 'glacier';
+    } else if (
       normalizedLayer === 'park' ||
       ['park', 'garden', 'grass', 'meadow', 'recreation_ground', 'pitch'].includes(areaKind)
     ) {
@@ -179,7 +187,9 @@ function buildNormalizedTags(
 
   if (normalizedLayer === 'natural') {
     const naturalKind = (kind ?? '').toLowerCase();
-    if (['forest', 'wood'].includes(naturalKind)) {
+    if (['glacier', 'ice', 'snow', 'snowfield'].includes(naturalKind)) {
+      tags.natural = tags.natural ?? 'glacier';
+    } else if (['forest', 'wood'].includes(naturalKind)) {
       tags.natural = tags.natural ?? 'wood';
     } else if (['water', 'lake', 'river'].includes(naturalKind)) {
       tags.natural = tags.natural ?? 'water';

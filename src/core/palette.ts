@@ -1,6 +1,7 @@
 export type FillStyleId =
   | 'ground'
   | 'water'
+  | 'glacier'
   | 'park'
   | 'forest'
   | 'farmland'
@@ -61,7 +62,15 @@ export const fillStyles: Record<FillStyleId, FillStyle> = {
     color: '#78b7d0',
     floss: 'DMC 3760',
     symbol: '~',
-    priority: 2,
+    priority: 5,
+  },
+  glacier: {
+    id: 'glacier',
+    label: 'Glacier',
+    color: '#dceef2',
+    floss: 'DMC 3756',
+    symbol: '^',
+    priority: 6,
   },
   park: {
     id: 'park',

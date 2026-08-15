@@ -463,6 +463,15 @@ function threeQuarterFraction(samples: PatternCellSample[]): PatternCellFraction
 }
 
 export function classifyPolygon(feature: PolygonFeature): FillStyle | null {
+  if (
+    feature.tags.natural === 'glacier' ||
+    feature.tags.landuse === 'glacier' ||
+    feature.tags.landcover === 'glacier' ||
+    feature.tags.landcover === 'ice'
+  ) {
+    return fillStyles.glacier;
+  }
+
   if (feature.tags.natural === 'water' || feature.tags.water === 'lake') {
     return fillStyles.water;
   }
